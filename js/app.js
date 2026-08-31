@@ -15,6 +15,7 @@ const state = {
 };
 
 let pendingProfileImage = '';
+let pendingBannerImage = '';
 
 function esc(value = '') {
   return String(value).replace(/[&<>'"]/g, ch => ({
@@ -138,6 +139,56 @@ async function imageFileToAvatar(file) {
     URL.revokeObjectURL(objectUrl);
   }
 }
+
+async function imageFileToBanner(file) {
+  if (!file) return '';
+  const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+  if (!allowed.includes(file.type)) throw new Error('Use a JPG, PNG or WEBP image.');
+  if (file.size > 12 * 1024 * 1024) throw new Error('Banner image must be smaller than 12 MB.');
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('That banner image could not be opened.'));
+      img.src = objectUrl;
+    });
+
+    const targetRatio = 3;
+    let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
+    const sourceRatio = sw / sh;
+
+    if (sourceRatio > targetRatio) {
+      sw = Math.floor(sh * targetRatio);
+      sx = Math.floor((img.naturalWidth - sw) / 2);
+    } else {
+      sh = Math.floor(sw / targetRatio);
+      sy = Math.floor((img.naturalHeight - sh) / 2);
+    }
+
+    for (const [w, h] of [[1200, 400], [960, 320], [720, 240]]) {
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
+
+      for (const quality of [0.82, 0.7, 0.58, 0.46]) {
+        let data = canvas.toDataURL('image/webp', quality);
+        if (!data.startsWith('data:image/webp')) {
+          data = canvas.toDataURL('image/jpeg', quality);
+        }
+        if (data.length <= 420000) return data;
+      }
+    }
+
+    throw new Error('That banner is still too large after compression. Try another image.');
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 
 function postLikeCount(postId) {
   return state.likes.filter(x => x.post_id === postId).length;
@@ -300,6 +351,11 @@ function renderProfile() {
   document.querySelector('#profileTitle').textContent = u.display_name;
   document.querySelector('#profileCount').textContent = `${posts.length} post${posts.length === 1 ? '' : 's'}`;
   setAvatarElement(document.querySelector('#profileAvatar'), u);
+  const profileBanner = document.querySelector('#profileBanner');
+  if (profileBanner) {
+    profileBanner.style.backgroundImage = u.banner_image ? `url("${u.banner_image}")` : '';
+    profileBanner.classList.toggle('has-image', !!u.banner_image);
+  }
   document.querySelector('#profileName').textContent = u.display_name;
   document.querySelector('#profileHandle').textContent = `@${u.username}`;
   document.querySelector('#profileBio').textContent = u.bio || '';
@@ -633,6 +689,11 @@ function injectAuthDialog() {
             <div id="editPfpPreview" class="avatar pfp-preview">?</div>
             <button class="secondary" id="removePfpButton" type="button">Remove picture</button>
           </div>
+
+          <label><span>Banner image</span><input id="editBanner" type="file" accept="image/jpeg,image/png,image/webp"></label>
+          <div id="editBannerPreview" class="banner-preview"></div>
+          <button class="secondary banner-remove" id="removeBannerButton" type="button">Remove banner</button>
+
           <label><span>Avatar letters (fallback)</span><input id="editAvatar" maxlength="3"></label>
         </div>
         <div class="dialog-actions"><span class="muted">Username stays fixed for now.</span><button class="primary" type="submit">Save</button></div>
@@ -657,6 +718,9 @@ function injectAuthDialog() {
   const editPfpInput = document.querySelector('#editPfp');
   const editPfpPreview = document.querySelector('#editPfpPreview');
   const removePfpButton = document.querySelector('#removePfpButton');
+  const editBannerInput = document.querySelector('#editBanner');
+  const editBannerPreview = document.querySelector('#editBannerPreview');
+  const removeBannerButton = document.querySelector('#removeBannerButton');
 
   editPfpInput.addEventListener('change', async () => {
     const file = editPfpInput.files?.[0];
@@ -683,6 +747,30 @@ function injectAuthDialog() {
     setAvatarElement(editPfpPreview, {
       avatar_text: document.querySelector('#editAvatar').value || state.me?.avatar_text || '?'
     });
+  });
+
+  editBannerInput.addEventListener('change', async () => {
+    const file = editBannerInput.files?.[0];
+    if (!file) return;
+    editBannerInput.disabled = true;
+    try {
+      pendingBannerImage = await imageFileToBanner(file);
+      editBannerPreview.style.backgroundImage = `url("${pendingBannerImage}")`;
+      editBannerPreview.classList.add('has-image');
+      toast('Banner ready. Save profile to apply it.');
+    } catch (err) {
+      editBannerInput.value = '';
+      toast(friendlyError(err), 'error');
+    } finally {
+      editBannerInput.disabled = false;
+    }
+  });
+
+  removeBannerButton.addEventListener('click', () => {
+    pendingBannerImage = '';
+    editBannerInput.value = '';
+    editBannerPreview.style.backgroundImage = '';
+    editBannerPreview.classList.remove('has-image');
   });
 
   document.querySelector('#editAvatar').addEventListener('input', e => {
@@ -775,6 +863,7 @@ function injectAuthDialog() {
         bio: document.querySelector('#editBio').value.trim(),
         avatar_text: document.querySelector('#editAvatar').value.trim().slice(0,3).toUpperCase() || state.me.avatar_text,
         avatar_image: pendingProfileImage,
+        banner_image: pendingBannerImage,
         updated_at: firebase.firestore.FieldValue.serverTimestamp()
       });
       document.querySelector('#editProfileDialog').close();
@@ -875,6 +964,13 @@ function openEditProfileDialog(u) {
   document.querySelector('#editPfp').value = '';
   pendingProfileImage = u.avatar_image || '';
   setAvatarElement(document.querySelector('#editPfpPreview'), u);
+
+  document.querySelector('#editBanner').value = '';
+  pendingBannerImage = u.banner_image || '';
+  const bannerPreview = document.querySelector('#editBannerPreview');
+  bannerPreview.style.backgroundImage = pendingBannerImage ? `url("${pendingBannerImage}")` : '';
+  bannerPreview.classList.toggle('has-image', !!pendingBannerImage);
+
   document.querySelector('#editProfileDialog').showModal();
 }
 

@@ -243,3 +243,30 @@ button:disabled { opacity: .55; cursor: wait; }
 .pfp-editor .secondary {
   width: auto;
 }
+
+
+/* SiarnoWatch v0.5.4: profile banners */
+.profile-banner {
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.profile-banner.has-image {
+  background-color: var(--surface-2);
+}
+.banner-preview {
+  width: 100%;
+  aspect-ratio: 3 / 1;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(120deg,#222832,#0d1014 60%,#29303c);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.banner-preview.has-image {
+  background-color: var(--surface-2);
+}
+.banner-remove {
+  width: fit-content;
+}
