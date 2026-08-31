@@ -19,6 +19,17 @@ const state = {
   messageUnsub: null,
   messageUnsubFor: null,
   messageDrafts: {},
+  callUnsub: null,
+  callDocUnsub: null,
+  callCandidateUnsubs: [],
+  activeCall: null,
+  peerConnection: null,
+  localCallStream: null,
+  remoteCallStream: null,
+  pendingRemoteCandidates: [],
+  callSound: null,
+  callRingTimer: null,
+  lastHandledIncomingCallId: null,
   unsubs: []
 };
 
@@ -370,6 +381,7 @@ function renderMessages() {
         <div class="avatar message-avatar">${avatarInnerHTML(target)}</div>
         <div><strong>${esc(target.display_name || target.username)}</strong><span>@${esc(target.username)}</span></div>
       </a>
+      <button id="messageCallButton" class="message-call-button" type="button">📞 Call</button>
     </header>
     <div id="messageThread" class="message-thread">
       ${state.activeMessages.length ? state.activeMessages.map(messageHTML).join('') : '<div class="message-placeholder thread-empty"><strong>Send the first Mini message. 😭</strong><span>This conversation is private between you two.</span></div>'}
@@ -389,6 +401,7 @@ function bindMessageActions() {
   const text = document.querySelector('#messageText');
   const count = document.querySelector('#messageCharCount');
   const send = document.querySelector('#messageSend');
+  document.querySelector('#messageCallButton')?.addEventListener('click', () => { const target = activeMessageTarget(); if (target) startCall(target); });
   if (!form || !text || !count || !send) return;
 
   text.addEventListener('input', () => {
@@ -511,6 +524,257 @@ function bindMessageActions() {
       try { await batch.commit(); } catch (err) { toast(friendlyError(err), 'error'); }
     });
   });
+}
+
+
+const CALL_AUDIO = {
+  incoming: 'assets/audio/call-incoming.mp3',
+  outgoing: 'assets/audio/call-outgoing.mp3',
+  end: 'assets/audio/call-end.mp3',
+  accepted: 'assets/audio/call-accepted.mp3'
+};
+
+const CALL_TERMINAL_STATUSES = new Set(['declined', 'cancelled', 'missed', 'ended']);
+
+function stopCallSound() {
+  if (!state.callSound) return;
+  try { state.callSound.pause(); state.callSound.currentTime = 0; } catch (_) {}
+  state.callSound = null;
+}
+
+function playCallSound(kind, loop = false) {
+  stopCallSound();
+  const src = CALL_AUDIO[kind];
+  if (!src) return;
+  const audio = new Audio(src);
+  audio.loop = loop;
+  audio.volume = 0.85;
+  state.callSound = audio;
+  audio.play().catch(err => console.warn('Call sound autoplay blocked:', err));
+}
+
+function injectCallUI() {
+  if (document.querySelector('#callOverlay')) return;
+  document.body.insertAdjacentHTML('beforeend', `
+    <section id="callOverlay" class="call-overlay hidden" aria-live="assertive">
+      <div class="call-card">
+        <div id="callAvatar" class="avatar call-avatar">?</div>
+        <h2 id="callName">SiarnoWatch Call</h2>
+        <div id="callHandle" class="call-handle"></div>
+        <p id="callStatus">Connecting…</p>
+        <div class="call-actions">
+          <button id="callAccept" class="call-circle accept hidden" type="button" aria-label="Accept call">✓</button>
+          <button id="callMute" class="call-circle neutral hidden" type="button" aria-label="Mute microphone">🎙</button>
+          <button id="callEnd" class="call-circle end hidden" type="button" aria-label="End call">✕</button>
+        </div>
+        <div id="callActionText" class="call-action-text"></div>
+      </div>
+    </section>
+    <audio id="remoteCallAudio" autoplay></audio>
+  `);
+  document.querySelector('#callAccept').addEventListener('click', acceptIncomingCall);
+  document.querySelector('#callEnd').addEventListener('click', () => {
+    if (state.activeCall?.role === 'callee' && state.activeCall?.status === 'ringing') declineIncomingCall();
+    else endActiveCall();
+  });
+  document.querySelector('#callMute').addEventListener('click', toggleCallMute);
+}
+
+function renderCallOverlay(mode, person, statusText) {
+  const overlay = document.querySelector('#callOverlay');
+  if (!overlay) return;
+  setAvatarElement(document.querySelector('#callAvatar'), person || fallbackProfile());
+  document.querySelector('#callName').textContent = person?.display_name || person?.username || 'SiarnoWatch user';
+  document.querySelector('#callHandle').textContent = person?.username ? `@${person.username}` : '';
+  document.querySelector('#callStatus').textContent = statusText || 'Connecting…';
+  const accept = document.querySelector('#callAccept');
+  const mute = document.querySelector('#callMute');
+  const end = document.querySelector('#callEnd');
+  accept.classList.toggle('hidden', mode !== 'incoming');
+  mute.classList.toggle('hidden', mode !== 'active');
+  end.classList.remove('hidden');
+  document.querySelector('#callActionText').textContent = mode === 'incoming' ? 'Accept        Decline' : mode === 'outgoing' ? 'Calling…' : 'Mute        End';
+  overlay.classList.remove('hidden');
+}
+
+function hideCallOverlay() { document.querySelector('#callOverlay')?.classList.add('hidden'); }
+function clearCallTimer() { if (state.callRingTimer) clearTimeout(state.callRingTimer); state.callRingTimer = null; }
+function clearCallDocListener() { if (state.callDocUnsub) { try { state.callDocUnsub(); } catch (_) {} } state.callDocUnsub = null; }
+function clearCallCandidateListeners() { state.callCandidateUnsubs.forEach(fn => { try { fn(); } catch (_) {} }); state.callCandidateUnsubs = []; }
+
+function cleanupPeerConnection() {
+  clearCallCandidateListeners();
+  state.pendingRemoteCandidates = [];
+  if (state.peerConnection) { try { state.peerConnection.close(); } catch (_) {} }
+  state.peerConnection = null;
+  if (state.localCallStream) state.localCallStream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
+  state.localCallStream = null;
+  state.remoteCallStream = null;
+  const audio = document.querySelector('#remoteCallAudio');
+  if (audio) audio.srcObject = null;
+}
+
+function finishCall({ playEnd = true, message = '' } = {}) {
+  const had = !!state.activeCall;
+  clearCallTimer(); clearCallDocListener(); cleanupPeerConnection(); stopCallSound();
+  state.activeCall = null; hideCallOverlay();
+  if (had && playEnd) playCallSound('end');
+  if (message) toast(message);
+}
+
+async function addOrQueueRemoteCandidate(data) {
+  if (!data || !state.peerConnection) return;
+  const candidate = new RTCIceCandidate(data);
+  if (state.peerConnection.remoteDescription) {
+    try { await state.peerConnection.addIceCandidate(candidate); } catch (err) { console.warn(err); }
+  } else state.pendingRemoteCandidates.push(candidate);
+}
+
+async function flushRemoteCandidates() {
+  if (!state.peerConnection?.remoteDescription) return;
+  const queue = [...state.pendingRemoteCandidates]; state.pendingRemoteCandidates = [];
+  for (const c of queue) { try { await state.peerConnection.addIceCandidate(c); } catch (err) { console.warn(err); } }
+}
+
+async function createCallPeer(callRef, role) {
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error('Your browser does not support microphone calls.');
+  const pc = new RTCPeerConnection({ iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ]});
+  state.peerConnection = pc;
+  const local = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }, video:false });
+  state.localCallStream = local;
+  local.getTracks().forEach(track => pc.addTrack(track, local));
+
+  const remote = new MediaStream(); state.remoteCallStream = remote;
+  const audio = document.querySelector('#remoteCallAudio'); if (audio) audio.srcObject = remote;
+  pc.ontrack = event => {
+    event.streams[0]?.getTracks().forEach(track => { if (!remote.getTracks().some(t => t.id === track.id)) remote.addTrack(track); });
+    audio?.play().catch(()=>{});
+  };
+
+  const own = role === 'caller' ? 'callerCandidates' : 'calleeCandidates';
+  const other = role === 'caller' ? 'calleeCandidates' : 'callerCandidates';
+  pc.onicecandidate = event => { if (event.candidate) callRef.collection(own).add(event.candidate.toJSON()).catch(console.warn); };
+  state.callCandidateUnsubs.push(callRef.collection(other).onSnapshot(s => {
+    s.docChanges().forEach(change => { if (change.type === 'added') addOrQueueRemoteCandidate(change.doc.data()); });
+  }, console.warn));
+
+  pc.onconnectionstatechange = () => {
+    if (!state.activeCall) return;
+    if (pc.connectionState === 'connected') {
+      const person = profileById(state.activeCall.other_uid) || fallbackProfile(state.activeCall.other_uid);
+      renderCallOverlay('active', person, 'Connected');
+    }
+    if (pc.connectionState === 'failed') endActiveCall('Call connection failed.');
+  };
+  return pc;
+}
+
+function listenToActiveCall(callRef, role) {
+  clearCallDocListener();
+  state.callDocUnsub = callRef.onSnapshot(async snap => {
+    if (!snap.exists || !state.activeCall || state.activeCall.id !== snap.id) return;
+    const data = snap.data(); state.activeCall.status = data.status;
+    if (role === 'caller' && data.status === 'accepted' && data.answer && state.peerConnection && !state.peerConnection.remoteDescription) {
+      try {
+        await state.peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+        await flushRemoteCandidates();
+        clearCallTimer(); stopCallSound(); playCallSound('accepted');
+        renderCallOverlay('active', profileById(data.callee_uid) || fallbackProfile(data.callee_uid), 'Connected');
+      } catch (err) { console.error(err); finishCall({message:'Could not connect the call.'}); }
+      return;
+    }
+    if (data.status === 'accepted' && role === 'callee') {
+      clearCallTimer();
+      renderCallOverlay('active', profileById(data.caller_uid) || fallbackProfile(data.caller_uid), 'Connected');
+      return;
+    }
+    if (CALL_TERMINAL_STATUSES.has(data.status)) {
+      const msg = data.status === 'declined' ? 'Call declined.' : data.status === 'missed' ? 'No answer.' : data.status === 'cancelled' ? 'Call cancelled.' : 'Call ended.';
+      finishCall({message:msg});
+    }
+  }, err => finishCall({message:friendlyError(err)}));
+}
+
+async function startCall(target) {
+  if (!state.user) return openAuthDialog();
+  if (!target || target.uid === state.user.uid) return;
+  if (state.activeCall) return toast('You are already in a call.', 'error');
+  injectCallUI();
+  const ref = state.db.collection('calls').doc();
+  state.activeCall = { id:ref.id, ref, role:'caller', other_uid:target.uid, status:'preparing' };
+  renderCallOverlay('outgoing', target, 'Preparing microphone…');
+  try {
+    await ref.set({ caller_uid:state.user.uid, callee_uid:target.uid, member_uids:[state.user.uid,target.uid].sort(), status:'preparing', offer:null, answer:null, created_at:firebase.firestore.FieldValue.serverTimestamp(), updated_at:firebase.firestore.FieldValue.serverTimestamp() });
+    const pc = await createCallPeer(ref, 'caller');
+    const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
+    await ref.update({ offer:{type:offer.type,sdp:offer.sdp}, status:'ringing', updated_at:firebase.firestore.FieldValue.serverTimestamp() });
+    state.activeCall.status='ringing'; listenToActiveCall(ref,'caller'); playCallSound('outgoing',true); renderCallOverlay('outgoing',target,'Calling…');
+    clearCallTimer(); state.callRingTimer=setTimeout(async()=>{
+      if (!state.activeCall || state.activeCall.id!==ref.id || state.activeCall.status!=='ringing') return;
+      try { await ref.update({status:'missed',ended_by:state.user.uid,updated_at:firebase.firestore.FieldValue.serverTimestamp()}); } catch(_){}
+      finishCall({message:'No answer.'});
+    },45000);
+  } catch(err) {
+    console.error(err); try { await ref.update({status:'cancelled',ended_by:state.user.uid,updated_at:firebase.firestore.FieldValue.serverTimestamp()}); } catch(_){}
+    finishCall({playEnd:false}); toast(err?.message || friendlyError(err),'error');
+  }
+}
+
+function showIncomingCall(call) {
+  if (!state.user || state.activeCall || !call?.offer || state.lastHandledIncomingCallId===call.id) return;
+  const created=timestampMillis(call.created_at); if (created && Date.now()-created>90000) return;
+  state.lastHandledIncomingCallId=call.id;
+  const ref=state.db.collection('calls').doc(call.id);
+  state.activeCall={id:call.id,ref,role:'callee',other_uid:call.caller_uid,status:'ringing'};
+  listenToActiveCall(ref,'callee'); playCallSound('incoming',true);
+  renderCallOverlay('incoming',profileById(call.caller_uid)||fallbackProfile(call.caller_uid),'Incoming audio call');
+}
+
+async function acceptIncomingCall() {
+  const active=state.activeCall; if (!active || active.role!=='callee' || active.status!=='ringing') return;
+  stopCallSound(); const person=profileById(active.other_uid)||fallbackProfile(active.other_uid); renderCallOverlay('outgoing',person,'Connecting microphone…');
+  try {
+    const snap=await active.ref.get(); if (!snap.exists || snap.data().status!=='ringing') return finishCall({playEnd:false,message:'That call is no longer ringing.'});
+    const data=snap.data(); const pc=await createCallPeer(active.ref,'callee');
+    await pc.setRemoteDescription(new RTCSessionDescription(data.offer)); await flushRemoteCandidates();
+    const answer=await pc.createAnswer(); await pc.setLocalDescription(answer);
+    await active.ref.update({answer:{type:answer.type,sdp:answer.sdp},status:'accepted',updated_at:firebase.firestore.FieldValue.serverTimestamp()});
+    state.activeCall.status='accepted'; playCallSound('accepted'); renderCallOverlay('active',person,'Connected');
+  } catch(err) { console.error(err); try { await active.ref.update({status:'ended',ended_by:state.user.uid,updated_at:firebase.firestore.FieldValue.serverTimestamp()}); } catch(_){} finishCall(); toast(err?.message||friendlyError(err),'error'); }
+}
+
+async function declineIncomingCall() {
+  const active=state.activeCall; if (!active || active.role!=='callee') return;
+  try { await active.ref.update({status:'declined',ended_by:state.user.uid,updated_at:firebase.firestore.FieldValue.serverTimestamp()}); } catch(err){console.warn(err);}
+  finishCall();
+}
+
+async function endActiveCall(customMessage='') {
+  const active=state.activeCall; if (!active) return;
+  const status=active.status==='ringing' && active.role==='caller' ? 'cancelled' : 'ended';
+  try { await active.ref.update({status,ended_by:state.user.uid,updated_at:firebase.firestore.FieldValue.serverTimestamp()}); } catch(err){console.warn(err);}
+  finishCall({message:customMessage});
+}
+
+function toggleCallMute() {
+  const tracks=state.localCallStream?.getAudioTracks()||[]; if (!tracks.length) return;
+  const muting=tracks.some(t=>t.enabled); tracks.forEach(t=>t.enabled=!muting);
+  const btn=document.querySelector('#callMute'); if (btn) btn.textContent=muting?'🔇':'🎙';
+  const txt=document.querySelector('#callActionText'); if (txt) txt.textContent=`${muting?'Unmute':'Mute'}        End`;
+}
+
+function subscribeCalls(user) {
+  if (state.callUnsub) { try { state.callUnsub(); } catch(_){} }
+  state.callUnsub=null; state.lastHandledIncomingCallId=null;
+  if (!user) { if (state.activeCall) finishCall({playEnd:false}); return; }
+  state.callUnsub=state.db.collection('calls').where('callee_uid','==',user.uid).onSnapshot(s=>{
+    if (state.activeCall) return;
+    const ringing=replaceSnapshot('calls',s).filter(c=>c.status==='ringing'&&c.offer).filter(c=>{const t=timestampMillis(c.created_at);return !t||Date.now()-t<90000;}).sort((a,b)=>timestampMillis(b.created_at)-timestampMillis(a.created_at));
+    if (ringing[0]) showIncomingCall(ringing[0]);
+  },err=>console.warn('Incoming call listener failed:',err));
 }
 
 function myNotifications() {
@@ -661,11 +925,13 @@ function renderProfile() {
 
   const followButton = document.querySelector('#followButton');
   const messageButton = document.querySelector('#messageButton');
+  const callButton = document.querySelector('#callButton');
   if (!followButton) return;
   if (state.user?.uid === u.uid) {
     followButton.textContent = 'Edit profile';
     followButton.onclick = () => openEditProfileDialog(u);
     messageButton?.classList.add('hidden');
+    callButton?.classList.add('hidden');
   } else {
     followButton.textContent = amIFollowing(u.uid) ? 'Following' : 'Follow';
     followButton.onclick = () => toggleFollow(u.uid);
@@ -676,6 +942,11 @@ function renderProfile() {
         if (!state.user) return openAuthDialog();
         location.href = `messages.html?u=${encodeURIComponent(u.username)}`;
       };
+    }
+    if (callButton) {
+      callButton.classList.remove('hidden');
+      callButton.textContent = 'Call';
+      callButton.onclick = () => startCall(u);
     }
   }
 }
@@ -1409,6 +1680,7 @@ async function bootFirebase() {
     state.user = user;
     subscribeNotifications(user);
     subscribeConversations(user);
+    subscribeCalls(user);
     updateAuthUI();
     renderCurrentPage();
   });
@@ -1418,6 +1690,7 @@ async function bootFirebase() {
   localStorage.removeItem('sw_local_posts');
   localStorage.removeItem('sw_likes');
   injectAuthDialog();
+  injectCallUI();
   setupComposer();
   setupCommentComposer();
   setupEditPost();

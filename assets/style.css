@@ -336,3 +336,30 @@ button:disabled { opacity: .55; cursor: wait; }
   .message-back { display: inline-block; }
   .profile-actions { right: 14px; }
 }
+
+
+/* SiarnoWatch v0.7: audio calls */
+.message-person { flex: 1; min-width: 0; }
+.message-call-button { margin-left:auto; border:1px solid var(--border); background:var(--surface-2); color:var(--text); border-radius:999px; padding:9px 14px; font:inherit; font-weight:800; cursor:pointer; white-space:nowrap; }
+.message-call-button:hover { border-color:#687180; }
+.call-overlay { position:fixed; inset:0; z-index:5000; display:grid; place-items:center; padding:20px; background:rgba(4,6,9,.82); backdrop-filter:blur(22px); }
+.call-card { width:min(390px,100%); padding:34px 24px 28px; text-align:center; border:1px solid var(--border); border-radius:28px; background:linear-gradient(180deg,#171c23,#0e1116); box-shadow:0 28px 100px rgba(0,0,0,.55); }
+.call-avatar { width:112px; height:112px; margin:0 auto 18px; font-size:30px; border:4px solid rgba(255,255,255,.12); }
+.call-card h2 { margin:0; font-size:25px; }
+.call-handle { margin-top:5px; color:var(--muted); font-size:14px; }
+.call-card p { min-height:24px; margin:20px 0 25px; color:var(--muted); }
+.call-actions { display:flex; justify-content:center; gap:30px; }
+.call-circle { width:64px; height:64px; display:grid; place-items:center; border:0; border-radius:50%; color:#fff; font-size:24px; font-weight:900; cursor:pointer; }
+.call-circle.accept { background:#2cba67; }
+.call-circle.end { background:#ef4c5d; }
+.call-circle.neutral { background:#353c47; }
+.call-action-text { min-height:18px; margin-top:12px; color:var(--muted); font-size:12px; white-space:pre; }
+.profile-main .profile-actions { position:absolute; top:14px; right:20px; display:flex; gap:8px; }
+.profile-main .profile-actions .secondary { position:static; }
+#remoteCallAudio { display:none; }
+@media (max-width:700px) {
+  .message-call-button { padding:9px 11px; font-size:0; }
+  .message-call-button::after { content:"📞"; font-size:18px; }
+  .profile-main .profile-actions { right:14px; gap:6px; }
+  .profile-actions .secondary { padding-inline:13px; }
+}
