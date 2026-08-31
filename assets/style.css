@@ -270,3 +270,14 @@ button:disabled { opacity: .55; cursor: wait; }
 .banner-remove {
   width: fit-content;
 }
+
+
+/* SiarnoWatch v0.5.5: real site logo */
+.brand-logo {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  display: block;
+  object-fit: contain;
+  border-radius: 10px;
+}
