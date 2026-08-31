@@ -648,10 +648,23 @@ function cleanupPeerConnection() {
 }
 
 function finishCall({ playEnd = true, message = '' } = {}) {
-  const had = !!state.activeCall;
-  clearCallTimer(); clearCallDocListener(); cleanupPeerConnection(); stopAllCallSounds();
-  state.activeCall = null; hideCallOverlay();
-  if (had && playEnd) playCallSound('end');
+  // Firestore can echo our own terminal status update before the caller's
+  // async update() finishes. That used to call finishCall() twice: the first
+  // call started call-end.mp3, then the second call immediately stopped it.
+  // If the call has already been cleaned up, leave the end sound alone.
+  if (!state.activeCall) {
+    if (message) toast(message);
+    return;
+  }
+
+  clearCallTimer();
+  clearCallDocListener();
+  cleanupPeerConnection();
+  stopAllCallSounds(playEnd ? 'end' : '');
+  state.activeCall = null;
+  hideCallOverlay();
+
+  if (playEnd) playCallSound('end');
   if (message) toast(message);
 }
 
