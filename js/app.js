@@ -27,7 +27,7 @@ const state = {
   localCallStream: null,
   remoteCallStream: null,
   pendingRemoteCandidates: [],
-  callSound: null,
+  callSounds: { incoming: null, outgoing: null, accepted: null, end: null },
   callRingTimer: null,
   lastHandledIncomingCallId: null,
   unsubs: []
@@ -528,29 +528,58 @@ function bindMessageActions() {
 
 
 const CALL_AUDIO = {
-  incoming: 'assets/audio/call-incoming.mp3',
-  outgoing: 'assets/audio/call-outgoing.mp3',
-  end: 'assets/audio/call-end.mp3',
-  accepted: 'assets/audio/call-accepted.mp3'
+  incoming: 'assets/audio/call-incoming.mp3?v=073',
+  outgoing: 'assets/audio/call-outgoing.mp3?v=073',
+  accepted: 'assets/audio/call-accepted.mp3?v=073',
+  end: 'assets/audio/call-end.mp3?v=073'
+};
+
+const CALL_AUDIO_IDS = {
+  incoming: 'callSoundIncoming',
+  outgoing: 'callSoundOutgoing',
+  accepted: 'callSoundAccepted',
+  end: 'callSoundEnd'
 };
 
 const CALL_TERMINAL_STATUSES = new Set(['declined', 'cancelled', 'missed', 'ended']);
 
-function stopCallSound() {
-  if (!state.callSound) return;
-  try { state.callSound.pause(); state.callSound.currentTime = 0; } catch (_) {}
-  state.callSound = null;
+function ensureCallSounds() {
+  for (const kind of Object.keys(CALL_AUDIO)) {
+    if (state.callSounds[kind]) continue;
+    const element = document.querySelector(`#${CALL_AUDIO_IDS[kind]}`) || new Audio(CALL_AUDIO[kind]);
+    element.preload = 'auto';
+    element.loop = kind === 'incoming' || kind === 'outgoing';
+    element.volume = 0.85;
+    state.callSounds[kind] = element;
+  }
 }
 
-function playCallSound(kind, loop = false) {
-  stopCallSound();
-  const src = CALL_AUDIO[kind];
-  if (!src) return;
-  const audio = new Audio(src);
-  audio.loop = loop;
-  audio.volume = 0.85;
-  state.callSound = audio;
-  audio.play().catch(err => console.warn('Call sound autoplay blocked:', err));
+function stopCallSound(kind) {
+  const audio = state.callSounds?.[kind];
+  if (!audio) return;
+  try {
+    audio.pause();
+    audio.currentTime = 0;
+  } catch (_) {}
+}
+
+function stopAllCallSounds(except = '') {
+  ensureCallSounds();
+  for (const kind of Object.keys(CALL_AUDIO)) {
+    if (kind !== except) stopCallSound(kind);
+  }
+}
+
+function playCallSound(kind) {
+  ensureCallSounds();
+  const audio = state.callSounds[kind];
+  if (!audio) return;
+
+  // Every call event owns its own MP3. Stop the previous event sound,
+  // then start this exact file from the beginning.
+  stopAllCallSounds(kind);
+  try { audio.currentTime = 0; } catch (_) {}
+  audio.play().catch(err => console.warn(`${kind} call sound autoplay blocked:`, err));
 }
 
 function injectCallUI() {
@@ -570,6 +599,10 @@ function injectCallUI() {
         <div id="callActionText" class="call-action-text"></div>
       </div>
     </section>
+    <audio id="callSoundIncoming" preload="auto" src="assets/audio/call-incoming.mp3?v=073"></audio>
+    <audio id="callSoundOutgoing" preload="auto" src="assets/audio/call-outgoing.mp3?v=073"></audio>
+    <audio id="callSoundAccepted" preload="auto" src="assets/audio/call-accepted.mp3?v=073"></audio>
+    <audio id="callSoundEnd" preload="auto" src="assets/audio/call-end.mp3?v=073"></audio>
     <audio id="remoteCallAudio" autoplay></audio>
   `);
   document.querySelector('#callAccept').addEventListener('click', acceptIncomingCall);
@@ -616,7 +649,7 @@ function cleanupPeerConnection() {
 
 function finishCall({ playEnd = true, message = '' } = {}) {
   const had = !!state.activeCall;
-  clearCallTimer(); clearCallDocListener(); cleanupPeerConnection(); stopCallSound();
+  clearCallTimer(); clearCallDocListener(); cleanupPeerConnection(); stopAllCallSounds();
   state.activeCall = null; hideCallOverlay();
   if (had && playEnd) playCallSound('end');
   if (message) toast(message);
@@ -718,7 +751,7 @@ function listenToActiveCall(callRef, role) {
       try {
         await state.peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
         await flushRemoteCandidates();
-        clearCallTimer(); stopCallSound(); playCallSound('accepted');
+        clearCallTimer(); stopAllCallSounds(); playCallSound('accepted');
         renderCallOverlay('active', profileById(data.callee_uid) || fallbackProfile(data.callee_uid), 'Connected');
       } catch (err) { console.error(err); finishCall({message:'Could not connect the call.'}); }
       return;
@@ -748,7 +781,7 @@ async function startCall(target) {
     const pc = await createCallPeer(ref, 'caller');
     const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
     await ref.update({ offer:{type:offer.type,sdp:offer.sdp}, status:'ringing', updated_at:firebase.firestore.FieldValue.serverTimestamp() });
-    state.activeCall.status='ringing'; listenToActiveCall(ref,'caller'); playCallSound('outgoing',true); renderCallOverlay('outgoing',target,'Calling…');
+    state.activeCall.status='ringing'; listenToActiveCall(ref,'caller'); playCallSound('outgoing'); renderCallOverlay('outgoing',target,'Calling…');
     clearCallTimer(); state.callRingTimer=setTimeout(async()=>{
       if (!state.activeCall || state.activeCall.id!==ref.id || state.activeCall.status!=='ringing') return;
       try { await ref.update({status:'missed',ended_by:state.user.uid,updated_at:firebase.firestore.FieldValue.serverTimestamp()}); } catch(_){}
@@ -766,13 +799,13 @@ function showIncomingCall(call) {
   state.lastHandledIncomingCallId=call.id;
   const ref=state.db.collection('calls').doc(call.id);
   state.activeCall={id:call.id,ref,role:'callee',other_uid:call.caller_uid,status:'ringing'};
-  listenToActiveCall(ref,'callee'); playCallSound('incoming',true);
+  listenToActiveCall(ref,'callee'); playCallSound('incoming');
   renderCallOverlay('incoming',profileById(call.caller_uid)||fallbackProfile(call.caller_uid),'Incoming audio call');
 }
 
 async function acceptIncomingCall() {
   const active=state.activeCall; if (!active || active.role!=='callee' || active.status!=='ringing') return;
-  stopCallSound(); const person=profileById(active.other_uid)||fallbackProfile(active.other_uid); renderCallOverlay('outgoing',person,'Connecting microphone…');
+  stopAllCallSounds(); const person=profileById(active.other_uid)||fallbackProfile(active.other_uid); renderCallOverlay('outgoing',person,'Connecting microphone…');
   try {
     const snap=await active.ref.get(); if (!snap.exists || snap.data().status!=='ringing') return finishCall({playEnd:false,message:'That call is no longer ringing.'});
     const data=snap.data(); const pc=await createCallPeer(active.ref,'callee');
