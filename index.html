@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="description" content="SiarnoWatch — Mini social media." />
+  <title>SiarnoWatch</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body data-page="home">
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="index.html" aria-label="SiarnoWatch home"><span class="brand-mark">S</span><span class="brand-text">SiarnoWatch</span></a>
+      <nav class="nav">
+        <a class="nav-item active" href="index.html">⌂ <span>Home</span></a>
+        <button class="nav-item" id="searchButton">⌕ <span>Search</span></button>
+        <button class="nav-item" id="notificationsButton">♡ <span>Notifications</span></button>
+        <a class="nav-item" data-profile-link href="profile.html">◎ <span>Profile</span></a>
+      </nav>
+      <button class="primary compose-open">Post</button>
+      <button class="account-button" data-auth-button>Log in</button>
+      <div class="sidebar-footer">Mini social media.</div>
+    </aside>
+
+    <main class="feed-column">
+      <header class="topbar">
+        <div><h1>Home</h1><p>What's happening in the Mini world?</p></div>
+        <button class="icon-button compose-open" aria-label="New post">＋</button>
+      </header>
+
+      <section class="composer-inline">
+        <div class="avatar avatar-current">?</div>
+        <button class="composer-placeholder compose-open">What's happening?</button>
+      </section>
+
+      <section id="feed" class="feed" aria-live="polite"></section>
+    </main>
+
+    <aside class="rightbar">
+      <section class="panel"><h2>About SiarnoWatch</h2><p>Small posts. Small world. Maximum Mini.</p></section>
+      <section class="panel"><h2>Trending</h2><div class="trend">#Mini</div><div class="trend">#SiarnoWatch</div><div class="trend">#GeometryDash</div></section>
+      <section class="panel"><h2>Account</h2><button class="secondary wide" data-auth-button>Log in</button></section>
+    </aside>
+  </div>
+
+  <dialog id="composerDialog" class="dialog">
+    <form method="dialog" class="dialog-card" id="composerForm">
+      <div class="dialog-head"><strong>New post</strong><button class="icon-button" value="cancel" type="submit">×</button></div>
+      <textarea id="postText" maxlength="280" placeholder="What's happening in the Mini world?" required></textarea>
+      <div class="dialog-actions"><span id="charCount">0 / 280</span><button class="primary" id="publishButton" value="default" type="submit">Post</button></div>
+    </form>
+  </dialog>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
