@@ -8,6 +8,7 @@ const state = {
   posts: [],
   likes: [],
   follows: [],
+  comments: [],
   unsubs: []
 };
 
@@ -90,6 +91,16 @@ function didILike(postId) {
   return !!state.user && state.likes.some(x => x.post_id === postId && x.user_uid === state.user.uid);
 }
 
+function postCommentCount(postId) {
+  return state.comments.filter(x => x.post_id === postId).length;
+}
+
+function commentsForPost(postId) {
+  return state.comments
+    .filter(x => x.post_id === postId)
+    .sort((a, b) => tsDate(a.created_at) - tsDate(b.created_at));
+}
+
 function followCounts(uid) {
   return {
     followers: state.follows.filter(x => x.following_uid === uid).length,
@@ -115,7 +126,7 @@ function postHTML(post) {
         </div>
         <div class="post-content">${esc(post.content)}</div>
         <div class="post-actions">
-          <button class="post-action" data-open-post="${esc(post.id)}">💬 0</button>
+          <button class="post-action" data-open-post="${esc(post.id)}">💬 ${postCommentCount(post.id)}</button>
           <button class="post-action ${liked ? 'liked' : ''}" data-like="${esc(post.id)}">♥ ${postLikeCount(post.id)}</button>
           <button class="post-action" data-share="${esc(post.id)}">↗ Share</button>
         </div>
@@ -172,15 +183,59 @@ function renderProfile() {
   }
 }
 
+function commentHTML(comment) {
+  const u = profileById(comment.author_uid) || fallbackProfile(comment.author_uid);
+  const mine = state.user?.uid === comment.author_uid;
+  return `
+    <article class="comment" data-comment-id="${esc(comment.id)}">
+      <a href="profile.html?u=${encodeURIComponent(u.username)}" class="avatar comment-avatar">${esc(u.avatar_text || '?')}</a>
+      <div class="comment-main">
+        <div class="post-head">
+          <a class="post-name" href="profile.html?u=${encodeURIComponent(u.username)}">${esc(u.display_name || u.username)}</a>
+          <span class="post-handle">@${esc(u.username)}</span>
+          <span class="post-time">· ${relativeTime(comment.created_at)}</span>
+        </div>
+        <div class="comment-content">${esc(comment.content)}</div>
+        ${mine ? `<button class="comment-delete" data-delete-comment="${esc(comment.id)}">Delete</button>` : ''}
+      </div>
+    </article>`;
+}
+
+function renderComments(postId) {
+  const list = document.querySelector('#commentsList');
+  if (!list) return;
+  const comments = commentsForPost(postId);
+  list.innerHTML = comments.length
+    ? comments.map(commentHTML).join('')
+    : '<div class="empty comments-empty">No comments yet. Be the first Mini reply. 😭</div>';
+
+  list.querySelectorAll('[data-delete-comment]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!state.user) return openAuthDialog();
+      try {
+        await state.db.collection('comments').doc(btn.dataset.deleteComment).delete();
+        toast('Comment deleted.');
+      } catch (err) {
+        toast(friendlyError(err), 'error');
+      }
+    });
+  });
+}
+
 function renderSinglePost() {
   const id = new URLSearchParams(location.search).get('id');
   const target = document.querySelector('#singlePost');
   const post = state.posts.find(p => p.id === id);
   if (!post) {
     if (target) target.innerHTML = '<div class="empty">Post not found 😭</div>';
+    const list = document.querySelector('#commentsList');
+    if (list) list.innerHTML = '';
     return;
   }
   renderFeed([post], target);
+  renderComments(id);
+  const count = document.querySelector('#commentSectionCount');
+  if (count) count.textContent = `${postCommentCount(id)} comment${postCommentCount(id) === 1 ? '' : 's'}`;
 }
 
 function renderCurrentPage() {
@@ -277,6 +332,58 @@ function setupComposer() {
     } finally {
       publish.disabled = false;
       publish.textContent = 'Post';
+    }
+  });
+}
+
+function setupCommentComposer() {
+  const form = document.querySelector('#commentForm');
+  if (!form) return;
+
+  const text = document.querySelector('#commentText');
+  const count = document.querySelector('#commentCharCount');
+  const button = document.querySelector('#commentSubmit');
+
+  text.addEventListener('focus', () => {
+    if (!state.user) {
+      text.blur();
+      openAuthDialog();
+    }
+  });
+
+  text.addEventListener('input', () => {
+    count.textContent = `${text.value.length} / 280`;
+  });
+
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (!state.user) return openAuthDialog();
+    if (!state.me) return toast('Your profile is still loading. Try again in a second.', 'error');
+
+    const postId = new URLSearchParams(location.search).get('id');
+    const post = state.posts.find(p => p.id === postId);
+    const content = text.value.trim();
+
+    if (!post) return toast('That post no longer exists.', 'error');
+    if (!content) return;
+
+    button.disabled = true;
+    button.textContent = 'Replying…';
+    try {
+      await state.db.collection('comments').add({
+        post_id: postId,
+        author_uid: state.user.uid,
+        content,
+        created_at: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      text.value = '';
+      count.textContent = '0 / 280';
+      toast('Comment posted. 💬');
+    } catch (err) {
+      toast(friendlyError(err), 'error');
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Reply';
     }
   });
 }
@@ -482,6 +589,11 @@ function startRealtime() {
     state.follows = replaceSnapshot('follows', s);
     refresh();
   }, err => toast(friendlyError(err), 'error')));
+
+  state.unsubs.push(state.db.collection('comments').orderBy('created_at', 'asc').onSnapshot(s => {
+    state.comments = replaceSnapshot('comments', s);
+    refresh();
+  }, err => toast(friendlyError(err), 'error')));
 }
 
 async function bootFirebase() {
@@ -506,6 +618,7 @@ async function bootFirebase() {
   localStorage.removeItem('sw_likes');
   injectAuthDialog();
   setupComposer();
+  setupCommentComposer();
   setupGlobalActions();
   try {
     await bootFirebase();
