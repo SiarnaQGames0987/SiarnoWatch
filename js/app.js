@@ -9,6 +9,8 @@ const state = {
   likes: [],
   follows: [],
   comments: [],
+  notifications: [],
+  notificationUnsub: null,
   unsubs: []
 };
 
@@ -112,6 +114,73 @@ function amIFollowing(uid) {
   return !!state.user && state.follows.some(x => x.follower_uid === state.user.uid && x.following_uid === uid);
 }
 
+function myNotifications() {
+  if (!state.user) return [];
+  return state.notifications
+    .filter(n => n.target_uid === state.user.uid)
+    .sort((a, b) => tsDate(b.created_at) - tsDate(a.created_at));
+}
+
+function unreadNotificationCount() {
+  return myNotifications().filter(n => !n.read).length;
+}
+
+function notificationDestination(n) {
+  if ((n.type === 'like' || n.type === 'comment') && n.post_id) {
+    return `post.html?id=${encodeURIComponent(n.post_id)}`;
+  }
+  const actor = profileById(n.actor_uid);
+  return actor?.username ? `profile.html?u=${encodeURIComponent(actor.username)}` : 'index.html';
+}
+
+function notificationText(n) {
+  if (n.type === 'like') return 'liked your post';
+  if (n.type === 'comment') return 'commented on your post';
+  if (n.type === 'follow') return 'followed you';
+  return 'sent you a notification';
+}
+
+function notificationHTML(n) {
+  const actor = profileById(n.actor_uid) || fallbackProfile(n.actor_uid);
+  const icon = n.type === 'like' ? '♥' : n.type === 'comment' ? '💬' : '◎';
+  return `
+    <a class="notification-item ${n.read ? '' : 'unread'}" href="${esc(notificationDestination(n))}">
+      <div class="notification-icon">${icon}</div>
+      <div class="avatar notification-avatar">${esc(actor.avatar_text || '?')}</div>
+      <div class="notification-main">
+        <div><strong>${esc(actor.display_name || actor.username)}</strong> ${esc(notificationText(n))}</div>
+        <div class="notification-meta">@${esc(actor.username)} · ${relativeTime(n.created_at)}</div>
+      </div>
+      ${n.read ? '' : '<span class="unread-dot" aria-label="Unread"></span>'}
+    </a>`;
+}
+
+async function markNotificationsRead() {
+  if (!state.user || document.body.dataset.page !== 'notifications') return;
+  const unread = myNotifications().filter(n => !n.read);
+  if (!unread.length) return;
+  const batch = state.db.batch();
+  unread.forEach(n => batch.update(state.db.collection('notifications').doc(n.id), { read: true }));
+  try { await batch.commit(); } catch (err) { console.error(err); }
+}
+
+function renderNotifications() {
+  const target = document.querySelector('#notificationList');
+  if (!target) return;
+
+  if (!state.user) {
+    target.innerHTML = '<div class="empty">Log in to see your notifications. 🔔</div>';
+    return;
+  }
+
+  const items = myNotifications();
+  target.innerHTML = items.length
+    ? items.map(notificationHTML).join('')
+    : '<div class="empty">No notifications yet. Suspiciously peaceful. 😭</div>';
+
+  setTimeout(markNotificationsRead, 0);
+}
+
 function postHTML(post) {
   const u = profileById(post.author_uid) || fallbackProfile(post.author_uid);
   const liked = didILike(post.id);
@@ -163,7 +232,7 @@ function renderProfile() {
   const counts = followCounts(u.uid);
   document.title = `${u.display_name} (@${u.username}) · SiarnoWatch`;
   document.querySelector('#profileTitle').textContent = u.display_name;
-  document.querySelector('#profileCount').textContent = `${posts.length} posts`;
+  document.querySelector('#profileCount').textContent = `${posts.length} post${posts.length === 1 ? '' : 's'}`;
   document.querySelector('#profileAvatar').textContent = u.avatar_text || '?';
   document.querySelector('#profileName').textContent = u.display_name;
   document.querySelector('#profileHandle').textContent = `@${u.username}`;
@@ -213,7 +282,10 @@ function renderComments(postId) {
     btn.addEventListener('click', async () => {
       if (!state.user) return openAuthDialog();
       try {
-        await state.db.collection('comments').doc(btn.dataset.deleteComment).delete();
+        const batch = state.db.batch();
+        batch.delete(state.db.collection('comments').doc(btn.dataset.deleteComment));
+        batch.delete(state.db.collection('notifications').doc(`comment_${btn.dataset.deleteComment}`));
+        await batch.commit();
         toast('Comment deleted.');
       } catch (err) {
         toast(friendlyError(err), 'error');
@@ -243,6 +315,7 @@ function renderCurrentPage() {
   if (page === 'home') renderHome();
   if (page === 'profile') renderProfile();
   if (page === 'post') renderSinglePost();
+  if (page === 'notifications') renderNotifications();
 }
 
 function updateAuthUI() {
@@ -256,26 +329,80 @@ function updateAuthUI() {
   document.querySelectorAll('.avatar-current').forEach(el => {
     el.textContent = state.me?.avatar_text || '?';
   });
+
+  const unread = unreadNotificationCount();
+  document.querySelectorAll('[data-notification-badge]').forEach(el => {
+    el.textContent = unread > 99 ? '99+' : String(unread);
+    el.classList.toggle('hidden', unread === 0);
+  });
 }
 
 async function toggleLike(postId) {
   if (!state.user) return openAuthDialog();
+  const post = state.posts.find(p => p.id === postId);
+  if (!post) return toast('That post no longer exists.', 'error');
+
   const id = `${state.user.uid}_${postId}`;
   const ref = state.db.collection('likes').doc(id);
+  const notificationRef = state.db.collection('notifications').doc(`like_${id}`);
+
   try {
-    if (didILike(postId)) await ref.delete();
-    else await ref.set({ user_uid: state.user.uid, post_id: postId, created_at: firebase.firestore.FieldValue.serverTimestamp() });
+    const batch = state.db.batch();
+    if (didILike(postId)) {
+      batch.delete(ref);
+      if (post.author_uid !== state.user.uid) batch.delete(notificationRef);
+    } else {
+      batch.set(ref, {
+        user_uid: state.user.uid,
+        post_id: postId,
+        created_at: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      if (post.author_uid !== state.user.uid) {
+        batch.set(notificationRef, {
+          type: 'like',
+          actor_uid: state.user.uid,
+          target_uid: post.author_uid,
+          post_id: postId,
+          comment_id: '',
+          read: false,
+          created_at: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      }
+    }
+    await batch.commit();
   } catch (err) { toast(friendlyError(err), 'error'); }
 }
 
 async function toggleFollow(uid) {
   if (!state.user) return openAuthDialog();
   if (uid === state.user.uid) return;
+
   const id = `${state.user.uid}_${uid}`;
   const ref = state.db.collection('follows').doc(id);
+  const notificationRef = state.db.collection('notifications').doc(`follow_${id}`);
+
   try {
-    if (amIFollowing(uid)) await ref.delete();
-    else await ref.set({ follower_uid: state.user.uid, following_uid: uid, created_at: firebase.firestore.FieldValue.serverTimestamp() });
+    const batch = state.db.batch();
+    if (amIFollowing(uid)) {
+      batch.delete(ref);
+      batch.delete(notificationRef);
+    } else {
+      batch.set(ref, {
+        follower_uid: state.user.uid,
+        following_uid: uid,
+        created_at: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      batch.set(notificationRef, {
+        type: 'follow',
+        actor_uid: state.user.uid,
+        target_uid: uid,
+        post_id: '',
+        comment_id: '',
+        read: false,
+        created_at: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    }
+    await batch.commit();
   } catch (err) { toast(friendlyError(err), 'error'); }
 }
 
@@ -370,12 +497,29 @@ function setupCommentComposer() {
     button.disabled = true;
     button.textContent = 'Replying…';
     try {
-      await state.db.collection('comments').add({
+      const commentRef = state.db.collection('comments').doc();
+      const batch = state.db.batch();
+
+      batch.set(commentRef, {
         post_id: postId,
         author_uid: state.user.uid,
         content,
         created_at: firebase.firestore.FieldValue.serverTimestamp()
       });
+
+      if (post.author_uid !== state.user.uid) {
+        batch.set(state.db.collection('notifications').doc(`comment_${commentRef.id}`), {
+          type: 'comment',
+          actor_uid: state.user.uid,
+          target_uid: post.author_uid,
+          post_id: postId,
+          comment_id: commentRef.id,
+          read: false,
+          created_at: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      }
+
+      await batch.commit();
       text.value = '';
       count.textContent = '0 / 280';
       toast('Comment posted. 💬');
@@ -554,11 +698,32 @@ function setupGlobalActions() {
     const feed = document.querySelector('#feed');
     if (feed) renderFeed(matches, feed);
   });
-  document.querySelector('#notificationsButton')?.addEventListener('click', () => toast('Notifications are next. 😭'));
 }
 
 function replaceSnapshot(target, snapshot) {
   return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+}
+
+function subscribeNotifications(user) {
+  if (state.notificationUnsub) {
+    try { state.notificationUnsub(); } catch (_) {}
+    state.notificationUnsub = null;
+  }
+  state.notifications = [];
+
+  if (!user) {
+    updateAuthUI();
+    renderCurrentPage();
+    return;
+  }
+
+  state.notificationUnsub = state.db.collection('notifications')
+    .where('target_uid', '==', user.uid)
+    .onSnapshot(s => {
+      state.notifications = replaceSnapshot('notifications', s);
+      updateAuthUI();
+      renderCurrentPage();
+    }, err => toast(friendlyError(err), 'error'));
 }
 
 function startRealtime() {
@@ -608,6 +773,7 @@ async function bootFirebase() {
   startRealtime();
   state.auth.onAuthStateChanged(user => {
     state.user = user;
+    subscribeNotifications(user);
     updateAuthUI();
     renderCurrentPage();
   });

@@ -159,3 +159,51 @@ button:disabled { opacity: .55; cursor: wait; }
 @media (max-width: 700px) {
   .comments-head, .comment-form, .comment { padding-left: 14px; padding-right: 14px; }
 }
+
+
+/* SiarnoWatch v0.5: notifications */
+.nav-item { position: relative; }
+.nav-badge {
+  margin-left: auto;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 900;
+}
+.notification-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34px 44px minmax(0, 1fr) 12px;
+  align-items: center;
+  gap: 12px;
+  padding: 17px 20px;
+  border-bottom: 1px solid var(--border);
+  transition: background .15s ease;
+}
+.notification-item:hover { background: rgba(255,255,255,.02); }
+.notification-item.unread { background: rgba(255,255,255,.035); }
+.notification-icon {
+  font-size: 20px;
+  text-align: center;
+}
+.notification-avatar { width: 42px; height: 42px; }
+.notification-main { min-width: 0; line-height: 1.4; }
+.notification-meta { margin-top: 4px; color: var(--muted); font-size: 13px; }
+.unread-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+@media (max-width: 980px) {
+  .nav-badge { position: absolute; top: 4px; right: 3px; }
+}
+@media (max-width: 700px) {
+  .notification-item { padding-left: 14px; padding-right: 14px; grid-template-columns: 28px 40px minmax(0, 1fr) 10px; }
+}
