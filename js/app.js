@@ -14,6 +14,8 @@ const state = {
   unsubs: []
 };
 
+let pendingProfileImage = '';
+
 function esc(value = '') {
   return String(value).replace(/[&<>'"]/g, ch => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
@@ -83,6 +85,58 @@ function profileByUsername(username) {
 
 function fallbackProfile(uid = '') {
   return { uid, username: 'unknown', username_lower: 'unknown', display_name: 'Unknown', bio: '', avatar_text: '?' };
+}
+
+function avatarInnerHTML(profile) {
+  if (profile?.avatar_image) {
+    return `<img class="avatar-image" src="${esc(profile.avatar_image)}" alt="">`;
+  }
+  return esc(profile?.avatar_text || '?');
+}
+
+function setAvatarElement(el, profile) {
+  if (!el) return;
+  el.innerHTML = avatarInnerHTML(profile);
+}
+
+async function imageFileToAvatar(file) {
+  if (!file) return '';
+  const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+  if (!allowed.includes(file.type)) throw new Error('Use a JPG, PNG or WEBP image.');
+  if (file.size > 8 * 1024 * 1024) throw new Error('Profile picture must be smaller than 8 MB.');
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('That image could not be opened.'));
+      img.src = objectUrl;
+    });
+
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    const sx = Math.floor((img.naturalWidth - side) / 2);
+    const sy = Math.floor((img.naturalHeight - side) / 2);
+
+    for (const size of [256, 224, 192, 160]) {
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+
+      for (const quality of [0.84, 0.72, 0.6, 0.48]) {
+        let data = canvas.toDataURL('image/webp', quality);
+        if (!data.startsWith('data:image/webp')) {
+          data = canvas.toDataURL('image/jpeg', quality);
+        }
+        if (data.length <= 180000) return data;
+      }
+    }
+    throw new Error('That image is still too large after compression. Try another image.');
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 function postLikeCount(postId) {
@@ -156,7 +210,7 @@ function notificationHTML(n) {
   return `
     <a class="notification-item ${n.read ? '' : 'unread'}" href="${esc(notificationDestination(n))}">
       <div class="notification-icon">${icon}</div>
-      <div class="avatar notification-avatar">${esc(actor.avatar_text || '?')}</div>
+      <div class="avatar notification-avatar">${avatarInnerHTML(actor)}</div>
       <div class="notification-main">
         <div><strong>${esc(actor.display_name || actor.username)}</strong> ${esc(notificationText(n))}</div>
         ${preview ? `<div class="notification-preview">“${esc(preview)}”</div>` : ''}
@@ -197,7 +251,7 @@ function postHTML(post) {
   const liked = didILike(post.id);
   return `
     <article class="post" data-id="${esc(post.id)}">
-      <a href="profile.html?u=${encodeURIComponent(u.username)}" class="avatar">${esc(u.avatar_text || '?')}</a>
+      <a href="profile.html?u=${encodeURIComponent(u.username)}" class="avatar">${avatarInnerHTML(u)}</a>
       <div class="post-main">
         <div class="post-head">
           <a class="post-name" href="profile.html?u=${encodeURIComponent(u.username)}">${esc(u.display_name || u.username)}</a>
@@ -245,7 +299,7 @@ function renderProfile() {
   document.title = `${u.display_name} (@${u.username}) · SiarnoWatch`;
   document.querySelector('#profileTitle').textContent = u.display_name;
   document.querySelector('#profileCount').textContent = `${posts.length} post${posts.length === 1 ? '' : 's'}`;
-  document.querySelector('#profileAvatar').textContent = u.avatar_text || '?';
+  setAvatarElement(document.querySelector('#profileAvatar'), u);
   document.querySelector('#profileName').textContent = u.display_name;
   document.querySelector('#profileHandle').textContent = `@${u.username}`;
   document.querySelector('#profileBio').textContent = u.bio || '';
@@ -269,7 +323,7 @@ function commentHTML(comment) {
   const mine = state.user?.uid === comment.author_uid;
   return `
     <article class="comment" data-comment-id="${esc(comment.id)}">
-      <a href="profile.html?u=${encodeURIComponent(u.username)}" class="avatar comment-avatar">${esc(u.avatar_text || '?')}</a>
+      <a href="profile.html?u=${encodeURIComponent(u.username)}" class="avatar comment-avatar">${avatarInnerHTML(u)}</a>
       <div class="comment-main">
         <div class="post-head">
           <a class="post-name" href="profile.html?u=${encodeURIComponent(u.username)}">${esc(u.display_name || u.username)}</a>
@@ -339,7 +393,7 @@ function updateAuthUI() {
     link.href = state.me ? `profile.html?u=${encodeURIComponent(state.me.username)}` : 'profile.html';
   });
   document.querySelectorAll('.avatar-current').forEach(el => {
-    el.textContent = state.me?.avatar_text || '?';
+    setAvatarElement(el, state.me);
   });
 
   const unread = unreadNotificationCount();
@@ -574,7 +628,12 @@ function injectAuthDialog() {
         <div class="auth-grid">
           <label><span>Display name</span><input id="editDisplayName" maxlength="40" required></label>
           <label><span>Bio</span><input id="editBio" maxlength="160"></label>
-          <label><span>Avatar letters</span><input id="editAvatar" maxlength="3"></label>
+          <label><span>Profile picture</span><input id="editPfp" type="file" accept="image/jpeg,image/png,image/webp"></label>
+          <div class="pfp-editor">
+            <div id="editPfpPreview" class="avatar pfp-preview">?</div>
+            <button class="secondary" id="removePfpButton" type="button">Remove picture</button>
+          </div>
+          <label><span>Avatar letters (fallback)</span><input id="editAvatar" maxlength="3"></label>
         </div>
         <div class="dialog-actions"><span class="muted">Username stays fixed for now.</span><button class="primary" type="submit">Save</button></div>
       </form>
@@ -594,6 +653,43 @@ function injectAuthDialog() {
   document.querySelector('#authClose').onclick = () => document.querySelector('#authDialog').close();
   document.querySelector('#editProfileClose').onclick = () => document.querySelector('#editProfileDialog').close();
   document.querySelector('#editPostClose').onclick = () => document.querySelector('#editPostDialog').close();
+
+  const editPfpInput = document.querySelector('#editPfp');
+  const editPfpPreview = document.querySelector('#editPfpPreview');
+  const removePfpButton = document.querySelector('#removePfpButton');
+
+  editPfpInput.addEventListener('change', async () => {
+    const file = editPfpInput.files?.[0];
+    if (!file) return;
+    editPfpInput.disabled = true;
+    try {
+      pendingProfileImage = await imageFileToAvatar(file);
+      setAvatarElement(editPfpPreview, {
+        avatar_image: pendingProfileImage,
+        avatar_text: document.querySelector('#editAvatar').value || state.me?.avatar_text || '?'
+      });
+      toast('Profile picture ready. Save profile to apply it.');
+    } catch (err) {
+      editPfpInput.value = '';
+      toast(friendlyError(err), 'error');
+    } finally {
+      editPfpInput.disabled = false;
+    }
+  });
+
+  removePfpButton.addEventListener('click', () => {
+    pendingProfileImage = '';
+    editPfpInput.value = '';
+    setAvatarElement(editPfpPreview, {
+      avatar_text: document.querySelector('#editAvatar').value || state.me?.avatar_text || '?'
+    });
+  });
+
+  document.querySelector('#editAvatar').addEventListener('input', e => {
+    if (!pendingProfileImage) {
+      setAvatarElement(editPfpPreview, { avatar_text: e.target.value.trim().slice(0, 3).toUpperCase() || '?' });
+    }
+  });
 
   let signupMode = false;
   const form = document.querySelector('#authForm');
@@ -678,6 +774,7 @@ function injectAuthDialog() {
         display_name: document.querySelector('#editDisplayName').value.trim(),
         bio: document.querySelector('#editBio').value.trim(),
         avatar_text: document.querySelector('#editAvatar').value.trim().slice(0,3).toUpperCase() || state.me.avatar_text,
+        avatar_image: pendingProfileImage,
         updated_at: firebase.firestore.FieldValue.serverTimestamp()
       });
       document.querySelector('#editProfileDialog').close();
@@ -757,7 +854,7 @@ function openAuthDialog() {
     panel.classList.remove('hidden');
     const p = state.me || fallbackProfile(state.user.uid);
     panel.innerHTML = `
-      <div class="account-who"><div class="avatar">${esc(p.avatar_text || '?')}</div><div><strong>${esc(p.display_name || 'Account')}</strong><div class="muted">${p.username ? '@'+esc(p.username) : esc(state.user.email || '')}</div></div></div>
+      <div class="account-who"><div class="avatar">${avatarInnerHTML(p)}</div><div><strong>${esc(p.display_name || 'Account')}</strong><div class="muted">${p.username ? '@'+esc(p.username) : esc(state.user.email || '')}</div></div></div>
       <div class="account-buttons">${p.username ? `<a class="secondary account-link" href="profile.html?u=${encodeURIComponent(p.username)}">View profile</a>` : ''}<button class="secondary" id="signOutButton">Sign out</button></div>`;
     document.querySelector('#authTitle').textContent = 'Your account';
     document.querySelector('#signOutButton').onclick = async () => {
@@ -775,6 +872,9 @@ function openEditProfileDialog(u) {
   document.querySelector('#editDisplayName').value = u.display_name || '';
   document.querySelector('#editBio').value = u.bio || '';
   document.querySelector('#editAvatar').value = u.avatar_text || '';
+  document.querySelector('#editPfp').value = '';
+  pendingProfileImage = u.avatar_image || '';
+  setAvatarElement(document.querySelector('#editPfpPreview'), u);
   document.querySelector('#editProfileDialog').showModal();
 }
 
