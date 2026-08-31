@@ -638,10 +638,30 @@ async function flushRemoteCandidates() {
 
 async function createCallPeer(callRef, role) {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('Your browser does not support microphone calls.');
-  const pc = new RTCPeerConnection({ iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
-  ]});
+  const pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      { urls: 'stun:stun.relay.metered.ca:80' },
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    ],
+    iceCandidatePoolSize: 10
+  });
   state.peerConnection = pc;
   const local = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }, video:false });
   state.localCallStream = local;
@@ -656,7 +676,24 @@ async function createCallPeer(callRef, role) {
 
   const own = role === 'caller' ? 'callerCandidates' : 'calleeCandidates';
   const other = role === 'caller' ? 'calleeCandidates' : 'callerCandidates';
-  pc.onicecandidate = event => { if (event.candidate) callRef.collection(own).add(event.candidate.toJSON()).catch(console.warn); };
+  pc.onicecandidate = event => {
+    if (!event.candidate) return;
+    callRef.collection(own).add(event.candidate.toJSON()).catch(err => {
+      console.warn('ICE candidate write failed:', err);
+      if (err?.code === 'permission-denied') toast('Call ICE permission denied. Publish the latest Firestore Rules.', 'error');
+    });
+  };
+  pc.onicecandidateerror = event => {
+    console.warn('ICE candidate error:', event.errorCode, event.errorText, event.url);
+  };
+  pc.oniceconnectionstatechange = () => {
+    console.log('ICE state:', pc.iceConnectionState);
+    if (!state.activeCall) return;
+    if (pc.iceConnectionState === 'checking') {
+      const person = profileById(state.activeCall.other_uid) || fallbackProfile(state.activeCall.other_uid);
+      renderCallOverlay('active', person, 'Connecting audio…');
+    }
+  };
   state.callCandidateUnsubs.push(callRef.collection(other).onSnapshot(s => {
     s.docChanges().forEach(change => { if (change.type === 'added') addOrQueueRemoteCandidate(change.doc.data()); });
   }, console.warn));
@@ -667,7 +704,7 @@ async function createCallPeer(callRef, role) {
       const person = profileById(state.activeCall.other_uid) || fallbackProfile(state.activeCall.other_uid);
       renderCallOverlay('active', person, 'Connected');
     }
-    if (pc.connectionState === 'failed') endActiveCall('Call connection failed.');
+    if (pc.connectionState === 'failed') endActiveCall('Call connection failed even with relay. Try again or switch network.');
   };
   return pc;
 }
