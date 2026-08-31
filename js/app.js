@@ -202,13 +202,14 @@ function postHTML(post) {
         <div class="post-head">
           <a class="post-name" href="profile.html?u=${encodeURIComponent(u.username)}">${esc(u.display_name || u.username)}</a>
           <span class="post-handle">@${esc(u.username)}</span>
-          <span class="post-time">· ${relativeTime(post.created_at)}</span>
+          <span class="post-time">· ${relativeTime(post.created_at)}${post.edited_at ? ' · edited' : ''}</span>
         </div>
         <div class="post-content">${esc(post.content)}</div>
         <div class="post-actions">
           <button class="post-action" data-open-post="${esc(post.id)}">💬 ${postCommentCount(post.id)}</button>
           <button class="post-action ${liked ? 'liked' : ''}" data-like="${esc(post.id)}">♥ ${postLikeCount(post.id)}</button>
           <button class="post-action" data-share="${esc(post.id)}">↗ Share</button>
+          ${state.user?.uid === post.author_uid ? `<button class="post-action" data-edit-post="${esc(post.id)}">✎ Edit</button>` : ''}
         </div>
       </div>
     </article>`;
@@ -430,6 +431,10 @@ function bindPostActions(root = document) {
       setTimeout(() => btn.textContent = '↗ Share', 1200);
     } catch { window.prompt('Copy this link:', url); }
   }));
+
+  root.querySelectorAll('[data-edit-post]').forEach(btn => btn.addEventListener('click', () => {
+    openEditPostDialog(btn.dataset.editPost);
+  }));
 }
 
 function setupComposer() {
@@ -573,10 +578,22 @@ function injectAuthDialog() {
         </div>
         <div class="dialog-actions"><span class="muted">Username stays fixed for now.</span><button class="primary" type="submit">Save</button></div>
       </form>
+    </dialog>
+
+    <dialog id="editPostDialog" class="dialog">
+      <form class="dialog-card" id="editPostForm">
+        <div class="dialog-head"><strong>Edit post</strong><button class="icon-button" id="editPostClose" type="button">×</button></div>
+        <textarea id="editPostText" maxlength="280" required></textarea>
+        <div class="dialog-actions">
+          <span id="editPostCharCount">0 / 280</span>
+          <button class="primary" id="editPostSubmit" type="submit">Save</button>
+        </div>
+      </form>
     </dialog>`);
 
   document.querySelector('#authClose').onclick = () => document.querySelector('#authDialog').close();
   document.querySelector('#editProfileClose').onclick = () => document.querySelector('#editProfileDialog').close();
+  document.querySelector('#editPostClose').onclick = () => document.querySelector('#editPostDialog').close();
 
   let signupMode = false;
   const form = document.querySelector('#authForm');
@@ -666,6 +683,68 @@ function injectAuthDialog() {
       document.querySelector('#editProfileDialog').close();
       toast('Profile updated.');
     } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+}
+
+
+function openEditPostDialog(postId) {
+  if (!state.user) return openAuthDialog();
+  const post = state.posts.find(p => p.id === postId);
+  if (!post) return toast('That post no longer exists.', 'error');
+  if (post.author_uid !== state.user.uid) return toast('You can only edit your own posts.', 'error');
+
+  const dialog = document.querySelector('#editPostDialog');
+  const text = document.querySelector('#editPostText');
+  const count = document.querySelector('#editPostCharCount');
+
+  dialog.dataset.postId = postId;
+  text.value = post.content || '';
+  count.textContent = `${text.value.length} / 280`;
+  dialog.showModal();
+  text.focus();
+}
+
+function setupEditPost() {
+  const form = document.querySelector('#editPostForm');
+  if (!form) return;
+
+  const dialog = document.querySelector('#editPostDialog');
+  const text = document.querySelector('#editPostText');
+  const count = document.querySelector('#editPostCharCount');
+  const submit = document.querySelector('#editPostSubmit');
+
+  text.addEventListener('input', () => {
+    count.textContent = `${text.value.length} / 280`;
+  });
+
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (!state.user) return openAuthDialog();
+
+    const postId = dialog.dataset.postId;
+    const post = state.posts.find(p => p.id === postId);
+    const content = text.value.trim();
+
+    if (!post) return toast('That post no longer exists.', 'error');
+    if (post.author_uid !== state.user.uid) return toast('You can only edit your own posts.', 'error');
+    if (!content) return toast('Post cannot be empty.', 'error');
+
+    submit.disabled = true;
+    submit.textContent = 'Saving…';
+
+    try {
+      await state.db.collection('posts').doc(postId).update({
+        content,
+        edited_at: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      dialog.close();
+      toast('Post updated. ✎');
+    } catch (err) {
+      toast(friendlyError(err), 'error');
+    } finally {
+      submit.disabled = false;
+      submit.textContent = 'Save';
+    }
   });
 }
 
@@ -796,6 +875,7 @@ async function bootFirebase() {
   injectAuthDialog();
   setupComposer();
   setupCommentComposer();
+  setupEditPost();
   setupGlobalActions();
   try {
     await bootFirebase();
