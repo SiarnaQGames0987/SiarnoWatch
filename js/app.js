@@ -140,15 +140,26 @@ function notificationText(n) {
   return 'sent you a notification';
 }
 
+function notificationPostPreview(n) {
+  if (!n.post_id) return '';
+  const post = state.posts.find(p => p.id === n.post_id);
+  if (!post?.content) return '';
+  const text = String(post.content).replace(/\s+/g, ' ').trim();
+  const clipped = text.length > 72 ? `${text.slice(0, 72).trimEnd()}…` : text;
+  return clipped;
+}
+
 function notificationHTML(n) {
   const actor = profileById(n.actor_uid) || fallbackProfile(n.actor_uid);
   const icon = n.type === 'like' ? '♥' : n.type === 'comment' ? '💬' : '◎';
+  const preview = notificationPostPreview(n);
   return `
     <a class="notification-item ${n.read ? '' : 'unread'}" href="${esc(notificationDestination(n))}">
       <div class="notification-icon">${icon}</div>
       <div class="avatar notification-avatar">${esc(actor.avatar_text || '?')}</div>
       <div class="notification-main">
         <div><strong>${esc(actor.display_name || actor.username)}</strong> ${esc(notificationText(n))}</div>
+        ${preview ? `<div class="notification-preview">“${esc(preview)}”</div>` : ''}
         <div class="notification-meta">@${esc(actor.username)} · ${relativeTime(n.created_at)}</div>
       </div>
       ${n.read ? '' : '<span class="unread-dot" aria-label="Unread"></span>'}

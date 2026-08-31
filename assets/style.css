@@ -207,3 +207,13 @@ button:disabled { opacity: .55; cursor: wait; }
 @media (max-width: 700px) {
   .notification-item { padding-left: 14px; padding-right: 14px; grid-template-columns: 28px 40px minmax(0, 1fr) 10px; }
 }
+
+
+/* SiarnoWatch v0.5.1: notification post previews */
+.notification-preview {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
