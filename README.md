@@ -1,56 +1,65 @@
-# SiarnoWatch
+# SiarnoWatch v0.2
 
-**Mini social media.**
+**Mini social media — now with a real shared backend.**
 
-A static GitHub Pages MVP built with plain HTML, CSS and JavaScript.
+This build keeps GitHub Pages as the frontend and uses Supabase for accounts and shared data.
 
 ## What works
 
-- Home feed
-- User profiles
-- Individual post pages
-- Browser-local likes
-- Browser-local "Follow" state
-- New posts stored in `localStorage`
+- Real email/password sign up and login
+- Unique `@username`
+- Shared public feed (everyone sees the same posts)
+- 280-character posts
+- Shared likes
+- Real profiles
+- Shared follow/unfollow
+- Profile editing (display name, bio, avatar letters)
+- Search posts from the current feed
+- Individual post links
 - Responsive desktop/mobile layout
-- Static JSON data in `/data`
+- Old localStorage/demo posts are ignored and cleared
 
-## Important MVP limitation
+## 1. Create the database
 
-GitHub Pages is static. This version does **not** write user posts back to GitHub and does not include real accounts/authentication. New posts and likes live only in the current browser.
+1. Create a free Supabase project.
+2. Open **SQL Editor**.
+3. Paste the entire contents of `supabase/schema.sql` and run it once.
 
-Do not put GitHub tokens or private keys in frontend JavaScript.
+## 2. Connect the website
 
-## Run locally
+Open `js/config.js` and replace the two placeholders:
 
-Because the app loads JSON with `fetch()`, serve the folder over HTTP instead of double-clicking `index.html`.
-
-Python example:
-
-```bash
-python -m http.server 8000
+```js
+window.SW_CONFIG = {
+  supabaseUrl: "https://YOUR_PROJECT.supabase.co",
+  supabaseAnonKey: "YOUR_PUBLIC_ANON_KEY"
+};
 ```
 
-Then open `http://localhost:8000`.
+Use the project URL and the public anon/publishable key from your Supabase project settings.
 
-## Deploy to GitHub Pages
+**Do not put a service-role key in this file.** The frontend only needs the public key. Row Level Security in `schema.sql` protects writes.
 
-1. Create a repository, e.g. `SiarnoWatch`.
-2. Upload all files in this folder to the repository root.
-3. In GitHub: **Settings → Pages**.
-4. Choose **Deploy from a branch**.
-5. Select the default branch and `/ (root)`.
+## 3. GitHub Pages
 
-## Next build ideas
+Upload/replace the files in the root of your `SiarnoWatch` repository. GitHub Pages will deploy the new commit automatically.
 
-- Search
-- Replies
-- Real accounts
-- Moderation/reporting
-- Backend API for posting
-- Rate limits and anti-spam
-- Media uploads
+If email confirmation is enabled in Supabase Auth, a new account must confirm its email before logging in. Add your GitHub Pages URL as the Supabase Auth Site URL when you are ready.
+
+## Demo data
+
+`data/posts.json` and `data/users.json` are intentionally empty. v0.2 does not use demo JSON as the database.
+
+## Next Mini build
+
+- Replies/comments
+- Notifications
+- Delete-own-post menu
+- Better search
+- Reports/moderation queue
+- Rate limiting / anti-spam
+- Images
 
 ---
 
-SiarnoWatch MVP · 2026
+SiarnoWatch v0.2 · 2026
