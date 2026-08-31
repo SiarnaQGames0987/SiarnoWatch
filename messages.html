@@ -4,35 +4,35 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="icon" type="image/png" href="assets/swlogo.png" />
-  <title>Notifications · SiarnoWatch</title>
+  <title>Messages · SiarnoWatch</title>
   <link rel="stylesheet" href="assets/style.css" />
 </head>
-<body data-page="notifications">
+<body data-page="messages">
   <div class="app-shell">
     <aside class="sidebar">
       <a class="brand" href="index.html"><img class="brand-logo" src="assets/swlogo.png" alt="" /><span class="brand-text">SiarnoWatch</span></a>
       <nav class="nav">
         <a class="nav-item" href="index.html">⌂ <span>Home</span></a>
-        <a class="nav-item" href="messages.html">✉ <span>Messages</span><b class="nav-badge hidden" data-message-badge>0</b></a>
-        <a class="nav-item active" href="notifications.html">♡ <span>Notifications</span><b class="nav-badge hidden" data-notification-badge>0</b></a>
+        <a class="nav-item active" href="messages.html">✉ <span>Messages</span><b class="nav-badge hidden" data-message-badge>0</b></a>
+        <a class="nav-item" href="notifications.html">♡ <span>Notifications</span><b class="nav-badge hidden" data-notification-badge>0</b></a>
         <a class="nav-item" data-profile-link href="profile.html">◎ <span>Profile</span></a>
       </nav>
       <button class="account-button" data-auth-button>Log in</button>
       <div class="sidebar-footer">Mini social media.</div>
     </aside>
 
-    <main class="feed-column">
-      <header class="topbar">
-        <div><h1>Notifications</h1><p>Likes, replies and new followers.</p></div>
-      </header>
-      <section id="notificationList" class="notification-list" aria-live="polite"></section>
+    <main class="feed-column messages-column">
+      <header class="topbar"><div><h1>Messages</h1><p>Private Mini conversations.</p></div></header>
+      <div id="messagesLayout" class="messages-layout">
+        <aside id="conversationList" class="conversation-list"><div class="empty message-empty">Loading chats…</div></aside>
+        <section id="messagePane" class="message-pane"><div class="message-placeholder"><strong>Select a conversation</strong><span>Your Mini DMs will appear here.</span></div></section>
+      </div>
     </main>
 
     <aside class="rightbar">
-      <section class="panel"><h2>Notifications</h2><p>New activity appears here in real time.</p></section>
+      <section class="panel"><h2>Messages</h2><p>DMs are visible only to the two people in the conversation.</p></section>
     </aside>
   </div>
-
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>

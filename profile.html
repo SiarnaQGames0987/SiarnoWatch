@@ -13,6 +13,7 @@
       <a class="brand" href="index.html"><img class="brand-logo" src="assets/swlogo.png?v=0551" alt="SiarnoWatch logo" width="36" height="36" /><span class="brand-text">SiarnoWatch</span></a>
       <nav class="nav">
         <a class="nav-item" href="index.html">⌂ <span>Home</span></a>
+        <a class="nav-item" href="messages.html">✉ <span>Messages</span><b class="nav-badge hidden" data-message-badge>0</b></a>
         <a class="nav-item" href="notifications.html">♡ <span>Notifications</span><b class="nav-badge hidden" data-notification-badge>0</b></a>
         <a class="nav-item active" data-profile-link href="profile.html">◎ <span>Profile</span></a>
       </nav>
@@ -26,7 +27,7 @@
         <div id="profileBanner" class="profile-banner"></div>
         <div class="profile-main">
           <div id="profileAvatar" class="avatar profile-avatar">?</div>
-          <button class="secondary" id="followButton">Follow</button>
+          <div class="profile-actions"><button class="secondary hidden" id="messageButton">Message</button><button class="secondary" id="followButton">Follow</button></div>
           <h2 id="profileName">Profile</h2>
           <div id="profileHandle" class="muted">@...</div>
           <p id="profileBio"></p>

@@ -11,6 +11,14 @@ const state = {
   comments: [],
   notifications: [],
   notificationUnsub: null,
+  conversations: [],
+  conversationReads: [],
+  activeMessages: [],
+  conversationUnsub: null,
+  conversationReadUnsub: null,
+  messageUnsub: null,
+  messageUnsubFor: null,
+  messageDrafts: {},
   unsubs: []
 };
 
@@ -219,6 +227,285 @@ function amIFollowing(uid) {
   return !!state.user && state.follows.some(x => x.follower_uid === state.user.uid && x.following_uid === uid);
 }
 
+function timestampMillis(value) {
+  if (!value) return 0;
+  try { return tsDate(value).getTime(); } catch (_) { return 0; }
+}
+
+function conversationIdFor(uidA, uidB) {
+  return [String(uidA), String(uidB)].sort().join('__');
+}
+
+function conversationOtherUid(conversation) {
+  if (!state.user || !Array.isArray(conversation?.member_uids)) return '';
+  return conversation.member_uids.find(uid => uid !== state.user.uid) || '';
+}
+
+function conversationReadFor(conversationId) {
+  if (!state.user) return null;
+  return state.conversationReads.find(r => r.conversation_id === conversationId && r.user_uid === state.user.uid) || null;
+}
+
+function conversationIsUnread(conversation) {
+  if (!state.user || !conversation || conversation.last_sender_uid === state.user.uid) return false;
+  const read = conversationReadFor(conversation.id);
+  return timestampMillis(conversation.updated_at) > timestampMillis(read?.last_read_at);
+}
+
+function unreadMessageConversationCount() {
+  return state.conversations.filter(conversationIsUnread).length;
+}
+
+function myConversations() {
+  if (!state.user) return [];
+  return state.conversations
+    .filter(c => Array.isArray(c.member_uids) && c.member_uids.includes(state.user.uid))
+    .sort((a, b) => timestampMillis(b.updated_at) - timestampMillis(a.updated_at));
+}
+
+function activeMessageTarget() {
+  const username = new URLSearchParams(location.search).get('u');
+  if (!username) return null;
+  const target = profileByUsername(username);
+  if (!target || target.uid === state.user?.uid) return null;
+  return target;
+}
+
+function messageHTML(message) {
+  const mine = state.user?.uid === message.sender_uid;
+  return `
+    <div class="message-row ${mine ? 'mine' : 'theirs'}" data-message-id="${esc(message.id)}">
+      <div class="message-bubble">
+        <div class="message-content">${esc(message.content)}</div>
+        <div class="message-meta">${relativeTime(message.created_at)}${mine ? ` · <button class="message-delete" data-delete-message="${esc(message.id)}">Delete</button>` : ''}</div>
+      </div>
+    </div>`;
+}
+
+function conversationHTML(conversation) {
+  const otherUid = conversationOtherUid(conversation);
+  const other = profileById(otherUid) || fallbackProfile(otherUid);
+  const unread = conversationIsUnread(conversation);
+  return `
+    <a class="conversation-item ${unread ? 'unread' : ''}" href="messages.html?u=${encodeURIComponent(other.username)}">
+      <div class="avatar conversation-avatar">${avatarInnerHTML(other)}</div>
+      <div class="conversation-copy">
+        <div class="conversation-line"><strong>${esc(other.display_name || other.username)}</strong><span>${relativeTime(conversation.updated_at)}</span></div>
+        <div class="conversation-preview">${esc(conversation.last_message || 'Start a Mini conversation.')}</div>
+      </div>
+      ${unread ? '<span class="unread-dot" aria-label="Unread conversation"></span>' : ''}
+    </a>`;
+}
+
+function ensureActiveMessageSubscription(conversationId, exists) {
+  if (state.messageUnsubFor === conversationId && state.messageUnsub) return;
+  if (state.messageUnsub) {
+    try { state.messageUnsub(); } catch (_) {}
+  }
+  state.messageUnsub = null;
+  state.messageUnsubFor = conversationId || null;
+  state.activeMessages = [];
+
+  if (!conversationId || !exists || !state.user) return;
+  state.messageUnsub = state.db.collection('conversations').doc(conversationId).collection('messages')
+    .onSnapshot(snapshot => {
+      state.activeMessages = replaceSnapshot('messages', snapshot)
+        .sort((a, b) => timestampMillis(a.created_at) - timestampMillis(b.created_at));
+      renderMessages();
+    }, err => toast(friendlyError(err), 'error'));
+}
+
+async function markConversationRead(conversation) {
+  if (!state.user || !conversation || !conversationIsUnread(conversation)) return;
+  const readId = `${conversation.id}__${state.user.uid}`;
+  try {
+    await state.db.collection('conversation_reads').doc(readId).set({
+      conversation_id: conversation.id,
+      user_uid: state.user.uid,
+      last_read_at: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  } catch (err) { console.error(err); }
+}
+
+function renderMessages() {
+  if (document.body.dataset.page !== 'messages') return;
+  const list = document.querySelector('#conversationList');
+  const pane = document.querySelector('#messagePane');
+  const layout = document.querySelector('#messagesLayout');
+  if (!list || !pane) return;
+
+  if (!state.user) {
+    list.innerHTML = '<div class="empty message-empty">Log in to see your messages. 📨</div>';
+    pane.innerHTML = '<div class="message-placeholder"><strong>Messages</strong><span>Log in to start a Mini conversation.</span><button class="primary" type="button" data-auth-button-inline>Log in</button></div>';
+    pane.querySelector('[data-auth-button-inline]')?.addEventListener('click', openAuthDialog);
+    layout?.classList.remove('has-active');
+    ensureActiveMessageSubscription('', false);
+    return;
+  }
+
+  const conversations = myConversations();
+  list.innerHTML = conversations.length
+    ? conversations.map(conversationHTML).join('')
+    : '<div class="empty message-empty">No conversations yet. Find someone and hit Message. 😭</div>';
+
+  const target = activeMessageTarget();
+  if (!target) {
+    layout?.classList.remove('has-active');
+    pane.innerHTML = '<div class="message-placeholder"><strong>Select a conversation</strong><span>Your Mini DMs will appear here.</span></div>';
+    ensureActiveMessageSubscription('', false);
+    return;
+  }
+
+  layout?.classList.add('has-active');
+  const conversationId = conversationIdFor(state.user.uid, target.uid);
+  const conversation = state.conversations.find(c => c.id === conversationId) || null;
+  ensureActiveMessageSubscription(conversationId, !!conversation);
+  if (conversation) setTimeout(() => markConversationRead(conversation), 0);
+
+  const draft = state.messageDrafts[conversationId] || '';
+  pane.innerHTML = `
+    <header class="message-header">
+      <a class="message-back" href="messages.html" aria-label="Back to conversations">←</a>
+      <a class="message-person" href="profile.html?u=${encodeURIComponent(target.username)}">
+        <div class="avatar message-avatar">${avatarInnerHTML(target)}</div>
+        <div><strong>${esc(target.display_name || target.username)}</strong><span>@${esc(target.username)}</span></div>
+      </a>
+    </header>
+    <div id="messageThread" class="message-thread">
+      ${state.activeMessages.length ? state.activeMessages.map(messageHTML).join('') : '<div class="message-placeholder thread-empty"><strong>Send the first Mini message. 😭</strong><span>This conversation is private between you two.</span></div>'}
+    </div>
+    <form id="messageForm" class="message-form">
+      <textarea id="messageText" maxlength="1000" rows="1" placeholder="Write a message..." required>${esc(draft)}</textarea>
+      <div class="message-compose-bottom"><span id="messageCharCount">${draft.length} / 1000</span><button class="primary" id="messageSend" type="submit">Send</button></div>
+    </form>`;
+
+  const thread = pane.querySelector('#messageThread');
+  if (thread) thread.scrollTop = thread.scrollHeight;
+  bindMessageActions();
+}
+
+function bindMessageActions() {
+  const form = document.querySelector('#messageForm');
+  const text = document.querySelector('#messageText');
+  const count = document.querySelector('#messageCharCount');
+  const send = document.querySelector('#messageSend');
+  if (!form || !text || !count || !send) return;
+
+  text.addEventListener('input', () => {
+    count.textContent = `${text.value.length} / 1000`;
+    const target = activeMessageTarget();
+    if (state.user && target) state.messageDrafts[conversationIdFor(state.user.uid, target.uid)] = text.value;
+  });
+  text.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const target = activeMessageTarget();
+    const content = text.value.trim();
+    if (!state.user || !target || !content) return;
+    if (target.uid === state.user.uid) return;
+
+    send.disabled = true;
+    send.textContent = 'Sending…';
+    try {
+      const conversationId = conversationIdFor(state.user.uid, target.uid);
+      const conversationRef = state.db.collection('conversations').doc(conversationId);
+      const messageRef = conversationRef.collection('messages').doc();
+      const notificationRef = state.db.collection('notifications').doc(`message_${messageRef.id}`);
+      const readRef = state.db.collection('conversation_reads').doc(`${conversationId}__${state.user.uid}`);
+      const memberUids = [state.user.uid, target.uid].sort();
+      const existing = state.conversations.find(c => c.id === conversationId);
+      const batch = state.db.batch();
+
+      if (existing) {
+        batch.update(conversationRef, {
+          updated_at: firebase.firestore.FieldValue.serverTimestamp(),
+          last_message: content.slice(0, 160),
+          last_sender_uid: state.user.uid,
+          last_message_id: messageRef.id
+        });
+      } else {
+        batch.set(conversationRef, {
+          member_uids: memberUids,
+          created_at: firebase.firestore.FieldValue.serverTimestamp(),
+          updated_at: firebase.firestore.FieldValue.serverTimestamp(),
+          last_message: content.slice(0, 160),
+          last_sender_uid: state.user.uid,
+          last_message_id: messageRef.id
+        });
+      }
+
+      batch.set(messageRef, {
+        sender_uid: state.user.uid,
+        receiver_uid: target.uid,
+        content,
+        created_at: firebase.firestore.FieldValue.serverTimestamp()
+      });
+
+      batch.set(readRef, {
+        conversation_id: conversationId,
+        user_uid: state.user.uid,
+        last_read_at: firebase.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+
+      batch.set(notificationRef, {
+        type: 'message',
+        actor_uid: state.user.uid,
+        target_uid: target.uid,
+        post_id: '',
+        comment_id: '',
+        conversation_id: conversationId,
+        message_id: messageRef.id,
+        message_preview: content.slice(0, 120),
+        read: false,
+        created_at: firebase.firestore.FieldValue.serverTimestamp()
+      });
+
+      await batch.commit();
+      state.messageDrafts[conversationId] = '';
+      text.value = '';
+      count.textContent = '0 / 1000';
+      renderMessages();
+    } catch (err) {
+      toast(friendlyError(err), 'error');
+    } finally {
+      send.disabled = false;
+      send.textContent = 'Send';
+      text.focus();
+    }
+  });
+
+  document.querySelectorAll('[data-delete-message]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const target = activeMessageTarget();
+      if (!state.user || !target) return;
+      const messageId = button.dataset.deleteMessage;
+      const message = state.activeMessages.find(m => m.id === messageId);
+      if (!message || message.sender_uid !== state.user.uid) return;
+      const conversationId = conversationIdFor(state.user.uid, target.uid);
+      const conversation = state.conversations.find(c => c.id === conversationId);
+      const conversationRef = state.db.collection('conversations').doc(conversationId);
+      const batch = state.db.batch();
+      batch.delete(conversationRef.collection('messages').doc(messageId));
+      batch.delete(state.db.collection('notifications').doc(`message_${messageId}`));
+      if (conversation?.last_message_id === messageId) {
+        batch.update(conversationRef, {
+          updated_at: firebase.firestore.FieldValue.serverTimestamp(),
+          last_message: 'Message deleted.',
+          last_sender_uid: state.user.uid,
+          last_message_id: ''
+        });
+      }
+      try { await batch.commit(); } catch (err) { toast(friendlyError(err), 'error'); }
+    });
+  });
+}
+
 function myNotifications() {
   if (!state.user) return [];
   return state.notifications
@@ -235,6 +522,7 @@ function notificationDestination(n) {
     return `post.html?id=${encodeURIComponent(n.post_id)}`;
   }
   const actor = profileById(n.actor_uid);
+  if (n.type === 'message' && actor?.username) return `messages.html?u=${encodeURIComponent(actor.username)}`;
   return actor?.username ? `profile.html?u=${encodeURIComponent(actor.username)}` : 'index.html';
 }
 
@@ -242,6 +530,7 @@ function notificationText(n) {
   if (n.type === 'like') return 'liked your post';
   if (n.type === 'comment') return 'commented on your post';
   if (n.type === 'follow') return 'followed you';
+  if (n.type === 'message') return 'sent you a message';
   return 'sent you a notification';
 }
 
@@ -256,8 +545,8 @@ function notificationPostPreview(n) {
 
 function notificationHTML(n) {
   const actor = profileById(n.actor_uid) || fallbackProfile(n.actor_uid);
-  const icon = n.type === 'like' ? '♥' : n.type === 'comment' ? '💬' : '◎';
-  const preview = notificationPostPreview(n);
+  const icon = n.type === 'like' ? '♥' : n.type === 'comment' ? '💬' : n.type === 'message' ? '✉' : '◎';
+  const preview = n.type === 'message' ? (n.message_preview || '') : notificationPostPreview(n);
   return `
     <a class="notification-item ${n.read ? '' : 'unread'}" href="${esc(notificationDestination(n))}">
       <div class="notification-icon">${icon}</div>
@@ -364,13 +653,23 @@ function renderProfile() {
   renderFeed(posts, target);
 
   const followButton = document.querySelector('#followButton');
+  const messageButton = document.querySelector('#messageButton');
   if (!followButton) return;
   if (state.user?.uid === u.uid) {
     followButton.textContent = 'Edit profile';
     followButton.onclick = () => openEditProfileDialog(u);
+    messageButton?.classList.add('hidden');
   } else {
     followButton.textContent = amIFollowing(u.uid) ? 'Following' : 'Follow';
     followButton.onclick = () => toggleFollow(u.uid);
+    if (messageButton) {
+      messageButton.classList.remove('hidden');
+      messageButton.textContent = 'Message';
+      messageButton.onclick = () => {
+        if (!state.user) return openAuthDialog();
+        location.href = `messages.html?u=${encodeURIComponent(u.username)}`;
+      };
+    }
   }
 }
 
@@ -438,6 +737,7 @@ function renderCurrentPage() {
   if (page === 'profile') renderProfile();
   if (page === 'post') renderSinglePost();
   if (page === 'notifications') renderNotifications();
+  if (page === 'messages') renderMessages();
 }
 
 function updateAuthUI() {
@@ -456,6 +756,12 @@ function updateAuthUI() {
   document.querySelectorAll('[data-notification-badge]').forEach(el => {
     el.textContent = unread > 99 ? '99+' : String(unread);
     el.classList.toggle('hidden', unread === 0);
+  });
+
+  const unreadMessages = unreadMessageConversationCount();
+  document.querySelectorAll('[data-message-badge]').forEach(el => {
+    el.textContent = unreadMessages > 99 ? '99+' : String(unreadMessages);
+    el.classList.toggle('hidden', unreadMessages === 0);
   });
 }
 
@@ -1012,6 +1318,41 @@ function subscribeNotifications(user) {
     }, err => toast(friendlyError(err), 'error'));
 }
 
+function subscribeConversations(user) {
+  if (state.conversationUnsub) { try { state.conversationUnsub(); } catch (_) {} }
+  if (state.conversationReadUnsub) { try { state.conversationReadUnsub(); } catch (_) {} }
+  if (state.messageUnsub) { try { state.messageUnsub(); } catch (_) {} }
+  state.conversationUnsub = null;
+  state.conversationReadUnsub = null;
+  state.messageUnsub = null;
+  state.messageUnsubFor = null;
+  state.conversations = [];
+  state.conversationReads = [];
+  state.activeMessages = [];
+
+  if (!user) {
+    updateAuthUI();
+    renderCurrentPage();
+    return;
+  }
+
+  state.conversationUnsub = state.db.collection('conversations')
+    .where('member_uids', 'array-contains', user.uid)
+    .onSnapshot(snapshot => {
+      state.conversations = replaceSnapshot('conversations', snapshot);
+      updateAuthUI();
+      renderCurrentPage();
+    }, err => toast(friendlyError(err), 'error'));
+
+  state.conversationReadUnsub = state.db.collection('conversation_reads')
+    .where('user_uid', '==', user.uid)
+    .onSnapshot(snapshot => {
+      state.conversationReads = replaceSnapshot('conversation_reads', snapshot);
+      updateAuthUI();
+      renderCurrentPage();
+    }, err => toast(friendlyError(err), 'error'));
+}
+
 function startRealtime() {
   state.unsubs.forEach(fn => { try { fn(); } catch (_) {} });
   state.unsubs = [];
@@ -1060,6 +1401,7 @@ async function bootFirebase() {
   state.auth.onAuthStateChanged(user => {
     state.user = user;
     subscribeNotifications(user);
+    subscribeConversations(user);
     updateAuthUI();
     renderCurrentPage();
   });
