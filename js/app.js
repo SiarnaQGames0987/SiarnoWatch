@@ -11,6 +11,8 @@ const state = {
   comments: [],
   notifications: [],
   notificationUnsub: null,
+  deviceNotificationRegistration: null,
+  deviceNotificationInitialSnapshot: false,
   conversations: [],
   conversationReads: [],
   activeMessages: [],
@@ -860,6 +862,164 @@ function subscribeCalls(user) {
   },err=>console.warn('Incoming call listener failed:',err));
 }
 
+const DEVICE_NOTIFICATIONS_KEY = 'sw_device_notifications_enabled';
+const DEVICE_NOTIFICATION_SEEN_KEY = 'sw_device_notification_seen_ids';
+
+function deviceNotificationsSupported() {
+  return 'Notification' in window && 'serviceWorker' in navigator;
+}
+
+function deviceNotificationsEnabled() {
+  return deviceNotificationsSupported()
+    && Notification.permission === 'granted'
+    && localStorage.getItem(DEVICE_NOTIFICATIONS_KEY) === '1';
+}
+
+function rememberDeviceNotification(id) {
+  if (!id) return false;
+  let ids = [];
+  try { ids = JSON.parse(localStorage.getItem(DEVICE_NOTIFICATION_SEEN_KEY) || '[]'); } catch (_) {}
+  if (!Array.isArray(ids)) ids = [];
+  if (ids.includes(id)) return false;
+  ids.push(id);
+  if (ids.length > 120) ids = ids.slice(-120);
+  localStorage.setItem(DEVICE_NOTIFICATION_SEEN_KEY, JSON.stringify(ids));
+  return true;
+}
+
+async function ensureDeviceNotificationRegistration() {
+  if (!deviceNotificationsSupported()) throw new Error('Device notifications are not supported in this browser.');
+  if (state.deviceNotificationRegistration) return state.deviceNotificationRegistration;
+  state.deviceNotificationRegistration = await navigator.serviceWorker.register('sw.js?v=080', { scope: './' });
+  return state.deviceNotificationRegistration;
+}
+
+function syncDeviceNotificationCard() {
+  const card = document.querySelector('#deviceNotificationCard');
+  const button = document.querySelector('#deviceNotificationButton');
+  const status = document.querySelector('#deviceNotificationStatus');
+  if (!card || !button || !status) return;
+
+  if (!state.user) {
+    status.textContent = 'Log in to enable notifications on this device.';
+    button.textContent = 'Log in first';
+    button.disabled = true;
+    return;
+  }
+
+  if (!deviceNotificationsSupported()) {
+    status.textContent = 'This browser does not support system notifications.';
+    button.textContent = 'Not supported';
+    button.disabled = true;
+    return;
+  }
+
+  button.disabled = false;
+  if (Notification.permission === 'denied') {
+    status.textContent = 'Notifications are blocked in browser settings.';
+    button.textContent = 'Blocked by browser';
+    button.disabled = true;
+  } else if (deviceNotificationsEnabled()) {
+    status.textContent = 'Likes, comments, follows and messages can appear in this device notification center.';
+    button.textContent = 'Disable on this device';
+  } else {
+    status.textContent = 'Get SiarnoWatch activity in your Windows / Android notification center.';
+    button.textContent = 'Enable device notifications';
+  }
+}
+
+function injectDeviceNotificationCard() {
+  if (document.body.dataset.page !== 'notifications') return;
+  const list = document.querySelector('#notificationList');
+  if (!list || document.querySelector('#deviceNotificationCard')) return;
+  const card = document.createElement('section');
+  card.id = 'deviceNotificationCard';
+  card.className = 'device-notification-card';
+  card.innerHTML = `
+    <div class="device-notification-copy">
+      <strong>🔔 Device notifications</strong>
+      <span id="deviceNotificationStatus">Loading…</span>
+    </div>
+    <button id="deviceNotificationButton" class="secondary" type="button">Enable device notifications</button>`;
+  list.before(card);
+  card.querySelector('#deviceNotificationButton').addEventListener('click', toggleDeviceNotifications);
+  syncDeviceNotificationCard();
+}
+
+async function toggleDeviceNotifications() {
+  if (!state.user) return openAuthDialog();
+  if (!deviceNotificationsSupported()) return toast('Device notifications are not supported here.', 'error');
+
+  if (deviceNotificationsEnabled()) {
+    localStorage.removeItem(DEVICE_NOTIFICATIONS_KEY);
+    syncDeviceNotificationCard();
+    toast('Device notifications disabled on this device.');
+    return;
+  }
+
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      syncDeviceNotificationCard();
+      return toast('Notification permission was not granted.', 'error');
+    }
+    await ensureDeviceNotificationRegistration();
+    localStorage.setItem(DEVICE_NOTIFICATIONS_KEY, '1');
+    syncDeviceNotificationCard();
+    toast('Device notifications enabled. 🔔');
+
+    const reg = state.deviceNotificationRegistration;
+    await reg.showNotification('SiarnoWatch', {
+      body: 'Device notifications are ready. Mini 🔥',
+      icon: 'assets/swlogo.png',
+      badge: 'assets/swlogo.png',
+      tag: 'siarnowatch-notifications-ready',
+      data: { url: new URL('notifications.html', location.href).href }
+    });
+  } catch (err) {
+    console.error('Device notification setup failed:', err);
+    toast(err?.message || 'Could not enable device notifications.', 'error');
+  }
+}
+
+async function prepareDeviceNotifications(user) {
+  state.deviceNotificationInitialSnapshot = false;
+  if (!user || !deviceNotificationsSupported()) {
+    syncDeviceNotificationCard();
+    return;
+  }
+  if (localStorage.getItem(DEVICE_NOTIFICATIONS_KEY) === '1' && Notification.permission === 'granted') {
+    try { await ensureDeviceNotificationRegistration(); } catch (err) { console.warn('Service worker registration failed:', err); }
+  }
+  syncDeviceNotificationCard();
+}
+
+async function showDeviceNotification(notification) {
+  if (!state.user || notification?.target_uid !== state.user.uid || !deviceNotificationsEnabled()) return;
+  if (!rememberDeviceNotification(notification.id)) return;
+
+  try {
+    const reg = await ensureDeviceNotificationRegistration();
+    const actor = profileById(notification.actor_uid) || fallbackProfile(notification.actor_uid);
+    const actorName = actor.display_name || actor.username || 'Someone';
+    const action = notificationText(notification);
+    const preview = notification.type === 'message' ? String(notification.message_preview || '').trim() : notificationPostPreview(notification);
+    const body = `${actorName} ${action}${preview ? ` — ${preview}` : ''}`;
+    const url = new URL(notificationDestination(notification), location.href).href;
+
+    await reg.showNotification('SiarnoWatch', {
+      body,
+      icon: 'assets/swlogo.png',
+      badge: 'assets/swlogo.png',
+      tag: `siarnowatch-${notification.id}`,
+      renotify: true,
+      data: { url, notificationId: notification.id }
+    });
+  } catch (err) {
+    console.warn('Could not show device notification:', err);
+  }
+}
+
 function myNotifications() {
   if (!state.user) return [];
   return state.notifications
@@ -926,6 +1086,8 @@ async function markNotificationsRead() {
 function renderNotifications() {
   const target = document.querySelector('#notificationList');
   if (!target) return;
+  injectDeviceNotificationCard();
+  syncDeviceNotificationCard();
 
   if (!state.user) {
     target.innerHTML = '<div class="empty">Log in to see your notifications. 🔔</div>';
@@ -1663,6 +1825,7 @@ function subscribeNotifications(user) {
     state.notificationUnsub = null;
   }
   state.notifications = [];
+  state.deviceNotificationInitialSnapshot = false;
 
   if (!user) {
     updateAuthUI();
@@ -1673,9 +1836,16 @@ function subscribeNotifications(user) {
   state.notificationUnsub = state.db.collection('notifications')
     .where('target_uid', '==', user.uid)
     .onSnapshot(s => {
+      const isInitialSnapshot = !state.deviceNotificationInitialSnapshot;
+      const added = isInitialSnapshot ? [] : s.docChanges()
+        .filter(change => change.type === 'added')
+        .map(change => ({ id: change.doc.id, ...change.doc.data() }));
+
       state.notifications = replaceSnapshot('notifications', s);
+      state.deviceNotificationInitialSnapshot = true;
       updateAuthUI();
       renderCurrentPage();
+      added.forEach(showDeviceNotification);
     }, err => toast(friendlyError(err), 'error'));
 }
 
@@ -1761,6 +1931,7 @@ async function bootFirebase() {
   startRealtime();
   state.auth.onAuthStateChanged(user => {
     state.user = user;
+    prepareDeviceNotifications(user);
     subscribeNotifications(user);
     subscribeConversations(user);
     subscribeCalls(user);
