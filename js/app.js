@@ -360,7 +360,7 @@ function injectAuthDialog() {
         const user = credential.user;
         try {
           const batch = state.db.batch();
-          batch.create(reservation, { uid: user.uid, username: uname, created_at: firebase.firestore.FieldValue.serverTimestamp() });
+          batch.set(reservation, { uid: user.uid, username: uname, created_at: firebase.firestore.FieldValue.serverTimestamp() });
           batch.set(state.db.collection('profiles').doc(user.uid), {
             uid: user.uid,
             username: uname,
