@@ -453,20 +453,27 @@ function bindMessageActions() {
         last_read_at: firebase.firestore.FieldValue.serverTimestamp()
       }, { merge: true });
 
-      batch.set(notificationRef, {
-        type: 'message',
-        actor_uid: state.user.uid,
-        target_uid: target.uid,
-        post_id: '',
-        comment_id: '',
-        conversation_id: conversationId,
-        message_id: messageRef.id,
-        message_preview: content.slice(0, 120),
-        read: false,
-        created_at: firebase.firestore.FieldValue.serverTimestamp()
-      });
-
       await batch.commit();
+
+      // Notifications are intentionally written after the DM itself.
+      // A notification rule problem must never block the actual message.
+      try {
+        await notificationRef.set({
+          type: 'message',
+          actor_uid: state.user.uid,
+          target_uid: target.uid,
+          post_id: '',
+          comment_id: '',
+          conversation_id: conversationId,
+          message_id: messageRef.id,
+          message_preview: content.slice(0, 120),
+          read: false,
+          created_at: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      } catch (notificationError) {
+        console.warn('Message sent, but notification could not be created:', notificationError);
+      }
+
       state.messageDrafts[conversationId] = '';
       text.value = '';
       count.textContent = '0 / 1000';
