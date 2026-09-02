@@ -443,3 +443,28 @@ button:disabled { opacity: .55; cursor: wait; }
   .profile-actions .secondary { padding-inline: 13px; }
 }
 
+
+
+/* SiarnoWatch v0.9: photo DMs */
+.message-bubble.has-image { padding: 6px 6px 7px; overflow: hidden; }
+.message-bubble.has-image .message-content { padding: 7px 6px 2px; }
+.message-bubble.has-image .message-meta { padding-inline: 6px; }
+.message-image-button { display: block; width: 100%; max-width: 360px; padding: 0; border: 0; border-radius: 12px; overflow: hidden; background: transparent; cursor: zoom-in; }
+.message-image { display: block; width: 100%; max-height: 420px; object-fit: cover; border-radius: 12px; }
+.message-row.mine .message-image-button { background: rgba(0,0,0,.08); }
+.message-attachment-preview { position: relative; width: min(220px, 70%); margin: 0 0 8px; }
+.message-attachment-preview img { display: block; width: 100%; max-height: 180px; object-fit: cover; border-radius: 14px; border: 1px solid var(--border); }
+.message-attachment-preview button { position: absolute; top: 6px; right: 6px; width: 30px; height: 30px; border: 0; border-radius: 50%; background: rgba(0,0,0,.72); color: #fff; font-size: 20px; line-height: 1; cursor: pointer; }
+.message-compose-tools { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.message-photo-button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); background: var(--surface); cursor: pointer; font-weight: 800; font-size: 12px; }
+.message-photo-button:hover { background: var(--surface-2); }
+.message-photo-button input:disabled + * { opacity: .5; }
+.message-image-viewer { position: fixed; inset: 0; z-index: 7000; display: grid; place-items: center; padding: 24px; background: rgba(0,0,0,.88); backdrop-filter: blur(16px); }
+.message-image-viewer img { display: block; max-width: min(96vw, 1100px); max-height: 90vh; object-fit: contain; border-radius: 16px; box-shadow: 0 20px 90px rgba(0,0,0,.5); }
+.message-image-viewer-close { position: fixed; top: 18px; right: 18px; width: 44px; height: 44px; border: 1px solid rgba(255,255,255,.2); border-radius: 50%; background: rgba(20,20,20,.8); color: #fff; font-size: 28px; cursor: pointer; z-index: 1; }
+@media (max-width: 700px) {
+  .message-photo-button span { display: none; }
+  .message-photo-button { padding: 7px 10px; font-size: 16px; }
+  .message-image { max-height: 52vh; }
+  .message-attachment-preview { width: min(200px, 78%); }
+}

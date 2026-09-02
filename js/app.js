@@ -21,6 +21,7 @@ const state = {
   messageUnsub: null,
   messageUnsubFor: null,
   messageDrafts: {},
+  messageImageDrafts: {},
   callUnsub: null,
   callDocUnsub: null,
   callCandidateUnsubs: [],
@@ -211,6 +212,85 @@ async function imageFileToBanner(file) {
 }
 
 
+async function imageFileToMessage(file) {
+  if (!file) return '';
+  const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+  if (!allowed.includes(file.type)) throw new Error('Use a JPG, PNG or WEBP image.');
+  if (file.size > 8 * 1024 * 1024) throw new Error('Photo must be smaller than 8 MB.');
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('That photo could not be opened.'));
+      img.src = objectUrl;
+    });
+
+    const sourceW = img.naturalWidth;
+    const sourceH = img.naturalHeight;
+    if (!sourceW || !sourceH) throw new Error('That photo has invalid dimensions.');
+
+    for (const maxSide of [1280, 1080, 900, 720]) {
+      const scale = Math.min(1, maxSide / Math.max(sourceW, sourceH));
+      const w = Math.max(1, Math.round(sourceW * scale));
+      const h = Math.max(1, Math.round(sourceH * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, sourceW, sourceH, 0, 0, w, h);
+
+      for (const quality of [0.82, 0.72, 0.62, 0.52, 0.42]) {
+        let data = canvas.toDataURL('image/webp', quality);
+        if (!data.startsWith('data:image/webp')) data = canvas.toDataURL('image/jpeg', quality);
+        if (data.length <= 450000) return data;
+      }
+    }
+
+    throw new Error('That photo is still too large after compression. Try another one.');
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+function messageImageMime(data = '') {
+  if (data.startsWith('data:image/webp')) return 'image/webp';
+  if (data.startsWith('data:image/png')) return 'image/png';
+  return 'image/jpeg';
+}
+
+function ensureMessageImageViewer() {
+  if (document.querySelector('#messageImageViewer')) return;
+  document.body.insertAdjacentHTML('beforeend', `
+    <div id="messageImageViewer" class="message-image-viewer hidden" role="dialog" aria-modal="true" aria-label="Message photo">
+      <button id="messageImageViewerClose" class="message-image-viewer-close" type="button" aria-label="Close photo">×</button>
+      <img id="messageImageViewerImg" alt="Message photo">
+    </div>`);
+  const viewer = document.querySelector('#messageImageViewer');
+  const close = () => {
+    viewer.classList.add('hidden');
+    const img = document.querySelector('#messageImageViewerImg');
+    if (img) img.removeAttribute('src');
+  };
+  document.querySelector('#messageImageViewerClose')?.addEventListener('click', close);
+  viewer.addEventListener('click', e => { if (e.target === viewer) close(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !viewer.classList.contains('hidden')) close();
+  });
+}
+
+function openMessageImage(messageId) {
+  const message = state.activeMessages.find(m => m.id === messageId);
+  if (!message?.image_data) return;
+  ensureMessageImageViewer();
+  const viewer = document.querySelector('#messageImageViewer');
+  const img = document.querySelector('#messageImageViewerImg');
+  img.src = message.image_data;
+  viewer.classList.remove('hidden');
+}
+
+
 function postLikeCount(postId) {
   return state.likes.filter(x => x.post_id === postId).length;
 }
@@ -286,10 +366,15 @@ function activeMessageTarget() {
 
 function messageHTML(message) {
   const mine = state.user?.uid === message.sender_uid;
+  const photo = message.image_data
+    ? `<button class="message-image-button" type="button" data-open-message-image="${esc(message.id)}" aria-label="Open message photo"><img class="message-image" src="${esc(message.image_data)}" alt="Photo message" loading="lazy"></button>`
+    : '';
+  const content = message.content ? `<div class="message-content">${esc(message.content)}</div>` : '';
   return `
     <div class="message-row ${mine ? 'mine' : 'theirs'}" data-message-id="${esc(message.id)}">
-      <div class="message-bubble">
-        <div class="message-content">${esc(message.content)}</div>
+      <div class="message-bubble ${message.image_data ? 'has-image' : ''}">
+        ${photo}
+        ${content}
         <div class="message-meta">${relativeTime(message.created_at)}${mine ? ` · <button class="message-delete" data-delete-message="${esc(message.id)}">Delete</button>` : ''}</div>
       </div>
     </div>`;
@@ -376,6 +461,7 @@ function renderMessages() {
   if (conversation) setTimeout(() => markConversationRead(conversation), 0);
 
   const draft = state.messageDrafts[conversationId] || '';
+  const imageDraft = state.messageImageDrafts[conversationId] || '';
   pane.innerHTML = `
     <header class="message-header">
       <a class="message-back" href="messages.html" aria-label="Back to conversations">←</a>
@@ -389,8 +475,15 @@ function renderMessages() {
       ${state.activeMessages.length ? state.activeMessages.map(messageHTML).join('') : '<div class="message-placeholder thread-empty"><strong>Send the first Mini message. 😭</strong><span>This conversation is private between you two.</span></div>'}
     </div>
     <form id="messageForm" class="message-form">
-      <textarea id="messageText" maxlength="1000" rows="1" placeholder="Write a message..." required>${esc(draft)}</textarea>
-      <div class="message-compose-bottom"><span id="messageCharCount">${draft.length} / 1000</span><button class="primary" id="messageSend" type="submit">Send</button></div>
+      ${imageDraft ? `<div class="message-attachment-preview"><img src="${esc(imageDraft)}" alt="Photo ready to send"><button id="messageImageRemove" type="button" aria-label="Remove photo">×</button></div>` : ''}
+      <textarea id="messageText" maxlength="1000" rows="1" placeholder="Write a message...">${esc(draft)}</textarea>
+      <div class="message-compose-bottom">
+        <div class="message-compose-tools">
+          <label class="message-photo-button" title="Add photo">🖼️<span>Photo</span><input id="messageImageInput" type="file" accept="image/jpeg,image/png,image/webp" hidden></label>
+          <span id="messageCharCount">${draft.length} / 1000</span>
+        </div>
+        <button class="primary" id="messageSend" type="submit">Send</button>
+      </div>
     </form>`;
 
   const thread = pane.querySelector('#messageThread');
@@ -403,8 +496,42 @@ function bindMessageActions() {
   const text = document.querySelector('#messageText');
   const count = document.querySelector('#messageCharCount');
   const send = document.querySelector('#messageSend');
+  const imageInput = document.querySelector('#messageImageInput');
+  const imageRemove = document.querySelector('#messageImageRemove');
   document.querySelector('#messageCallButton')?.addEventListener('click', () => { const target = activeMessageTarget(); if (target) startCall(target); });
   if (!form || !text || !count || !send) return;
+
+  document.querySelectorAll('[data-open-message-image]').forEach(button => {
+    button.addEventListener('click', () => openMessageImage(button.dataset.openMessageImage));
+  });
+
+  imageInput?.addEventListener('change', async () => {
+    const file = imageInput.files?.[0];
+    const target = activeMessageTarget();
+    if (!file || !state.user || !target) return;
+    const conversationId = conversationIdFor(state.user.uid, target.uid);
+    imageInput.disabled = true;
+    try {
+      state.messageDrafts[conversationId] = text.value;
+      state.messageImageDrafts[conversationId] = await imageFileToMessage(file);
+      toast('Photo ready to send. 📸');
+      renderMessages();
+    } catch (err) {
+      imageInput.value = '';
+      toast(friendlyError(err), 'error');
+    } finally {
+      imageInput.disabled = false;
+    }
+  });
+
+  imageRemove?.addEventListener('click', () => {
+    const target = activeMessageTarget();
+    if (!state.user || !target) return;
+    const conversationId = conversationIdFor(state.user.uid, target.uid);
+    state.messageDrafts[conversationId] = text.value;
+    delete state.messageImageDrafts[conversationId];
+    renderMessages();
+  });
 
   text.addEventListener('input', () => {
     count.textContent = `${text.value.length} / 1000`;
@@ -422,13 +549,15 @@ function bindMessageActions() {
     e.preventDefault();
     const target = activeMessageTarget();
     const content = text.value.trim();
-    if (!state.user || !target || !content) return;
+    if (!state.user || !target) return;
+    const conversationId = conversationIdFor(state.user.uid, target.uid);
+    const imageData = state.messageImageDrafts[conversationId] || '';
+    if (!content && !imageData) return;
     if (target.uid === state.user.uid) return;
 
     send.disabled = true;
     send.textContent = 'Sending…';
     try {
-      const conversationId = conversationIdFor(state.user.uid, target.uid);
       const conversationRef = state.db.collection('conversations').doc(conversationId);
       const messageRef = conversationRef.collection('messages').doc();
       const notificationRef = state.db.collection('notifications').doc(`message_${messageRef.id}`);
@@ -436,11 +565,13 @@ function bindMessageActions() {
       const memberUids = [state.user.uid, target.uid].sort();
       const existing = state.conversations.find(c => c.id === conversationId);
       const batch = state.db.batch();
+      const conversationPreview = content ? content.slice(0, 160) : '📷 Photo';
+      const notificationPreview = content ? content.slice(0, 120) : '📷 Photo';
 
       if (existing) {
         batch.update(conversationRef, {
           updated_at: firebase.firestore.FieldValue.serverTimestamp(),
-          last_message: content.slice(0, 160),
+          last_message: conversationPreview,
           last_sender_uid: state.user.uid,
           last_message_id: messageRef.id
         });
@@ -449,18 +580,23 @@ function bindMessageActions() {
           member_uids: memberUids,
           created_at: firebase.firestore.FieldValue.serverTimestamp(),
           updated_at: firebase.firestore.FieldValue.serverTimestamp(),
-          last_message: content.slice(0, 160),
+          last_message: conversationPreview,
           last_sender_uid: state.user.uid,
           last_message_id: messageRef.id
         });
       }
 
-      batch.set(messageRef, {
+      const messageData = {
         sender_uid: state.user.uid,
         receiver_uid: target.uid,
         content,
         created_at: firebase.firestore.FieldValue.serverTimestamp()
-      });
+      };
+      if (imageData) {
+        messageData.image_data = imageData;
+        messageData.image_mime = messageImageMime(imageData);
+      }
+      batch.set(messageRef, messageData);
 
       batch.set(readRef, {
         conversation_id: conversationId,
@@ -481,7 +617,7 @@ function bindMessageActions() {
           comment_id: '',
           conversation_id: conversationId,
           message_id: messageRef.id,
-          message_preview: content.slice(0, 120),
+          message_preview: notificationPreview,
           read: false,
           created_at: firebase.firestore.FieldValue.serverTimestamp()
         });
@@ -490,6 +626,7 @@ function bindMessageActions() {
       }
 
       state.messageDrafts[conversationId] = '';
+      delete state.messageImageDrafts[conversationId];
       text.value = '';
       count.textContent = '0 / 1000';
       renderMessages();
@@ -1860,6 +1997,7 @@ function subscribeConversations(user) {
   state.conversations = [];
   state.conversationReads = [];
   state.activeMessages = [];
+  state.messageImageDrafts = {};
 
   if (!user) {
     updateAuthUI();
